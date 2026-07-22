@@ -1,0 +1,4 @@
+/.idea/
+/cmake-build-*/
+/src/engine/render/shaders/_tmp_*.spv
+/tests/
