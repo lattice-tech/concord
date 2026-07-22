@@ -219,7 +219,7 @@ ImportedModel GltfImporter::Import(const std::string& path)
                 if (n.IsNumber()) {
                     WalkNodes(nodes, meshes, accessors, bufferBytes, bufferViews,
                               materials, textures, images, dir,
-                              static_cast<int>(n.number), identity, model);
+                              n.IntegerOr(-1), identity, model);
                 }
             }
         }

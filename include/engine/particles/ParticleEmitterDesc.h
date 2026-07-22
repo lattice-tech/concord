@@ -8,6 +8,7 @@
 #include "engine/particles/EmitterShape.h"
 #include "engine/particles/ParticleBurst.h"
 #include "engine/particles/ParticleForceField.h"
+#include "engine/particles/ParticleSimulationBackend.h"
 #include "math/Vector3.h"
 
 #include <cstdint>
@@ -51,17 +52,14 @@ namespace Concord::Particles {
  *                     space; deterministic RNG seed.
  */
 struct ParticleEmitterDesc {
-    // ---- Placement ------------------------------------------------------
     Transform transform{};
 
-    // ---- Emission shape -------------------------------------------------
     EmitterShape shape = EmitterShape::Point;
     /** For Sphere: radius = shapeSize.x. For Box: half-extents. For Disc: radius = x. */
     Vector3 shapeSize{1.0f, 1.0f, 1.0f};
     /** Cone half-angle (degrees); ignored for other shapes. */
     float shapeAngleDegrees = 30.0f;
 
-    // ---- Emission timing ------------------------------------------------
     /** Continuous emission rate, in particles/second. 0 disables the stream. */
     float emissionRate = 30.0f;
 
@@ -85,11 +83,9 @@ struct ParticleEmitterDesc {
      */
     bool prewarm = false;
 
-    // ---- Particle lifetime ----------------------------------------------
     float lifetimeMin = 1.5f;
     float lifetimeMax = 1.5f;
 
-    // ---- Motion ---------------------------------------------------------
     /** Local direction each particle is aimed along (before per-particle spread). */
     Vector3 direction{0.0f, 1.0f, 0.0f};
 
@@ -120,7 +116,6 @@ struct ParticleEmitterDesc {
     /** Spatial frequency of the turbulence noise (higher = smaller eddies). */
     float turbulenceFrequency = 1.0f;
 
-    // ---- Force fields & collision ---------------------------------------
     /**
      * Spatial force fields applied each frame, on top of gravity. World-space
      * only (ignored when `localSpace` is true). Empty by default.
@@ -152,7 +147,6 @@ struct ParticleEmitterDesc {
      */
     float inheritEmitterVelocity = 0.0f;
 
-    // ---- Appearance -----------------------------------------------------
     /** 3-key linear color curve (0xRRGGBBAA), sampled at t=0.0 / 0.5 / 1.0. */
     std::uint32_t colorStart = 0xffffffffu;
     std::uint32_t colorMid = 0xffffffffu;
@@ -195,7 +189,6 @@ struct ParticleEmitterDesc {
      */
     float brightness = 2.0f;
 
-    // ---- Simulation -----------------------------------------------------
     /**
      * True to advance particles in the emitter's local space (so they follow
      * a moving emitter). World-space gravity is rotated into this simulation
@@ -203,6 +196,14 @@ struct ParticleEmitterDesc {
      * (default) bakes spawn positions into world space.
      */
     bool localSpace = false;
+
+    /**
+     * Selects per-particle simulation for this emitter. GPU simulation keeps
+     * particle state on the render device and publishes only one emitter
+     * command per frame; CPU simulation preserves exact host-side state. GPU
+     * simulation currently requires `billboard`; mesh particles fall back to CPU.
+     */
+    ParticleSimulationBackend simulationBackend = ParticleSimulationBackend::Cpu;
 
     /** RNG seed; two emitters with the same seed evolve identically. */
     std::uint32_t seed = 0xA5F3B21Cu;

@@ -16,6 +16,26 @@ float QuantizeSpan(float span) noexcept
     return std::exp2(std::ceil(std::log2(span)));
 }
 
+/** Fits depth bounds to a texel-aligned power-of-two span. */
+void FitStableDepthBounds(float minimum, float maximum, float slack,
+                          std::uint32_t resolution, float& nearPlane,
+                          float& farPlane) noexcept
+{
+    const float coverageResolution = static_cast<float>(std::max(resolution, 2u));
+    const float resolutionScale = coverageResolution / (coverageResolution - 1.0f);
+    const float required = (maximum - minimum + 2.0f * slack) * resolutionScale;
+    const float extent = QuantizeSpan(required);
+    const float texel = extent / static_cast<float>(std::max(resolution, 1u));
+    const float center = std::floor((minimum + maximum) * 0.5f / texel + 0.5f)
+        * texel;
+    nearPlane = center - extent * 0.5f;
+    farPlane = center + extent * 0.5f;
+    if (nearPlane < 0.01f) {
+        farPlane += 0.01f - nearPlane;
+        nearPlane = 0.01f;
+    }
+}
+
 /** Normalizes `v` with a straight-down fallback if it is degenerate. */
 bx::Vec3 Normalize(const bx::Vec3& v) noexcept
 {
@@ -115,18 +135,9 @@ void ComputeShadowFrustum(const float lightDir[3],
     float right = viewMax.x + slack;
     float bottom = viewMin.y - slack;
     float top = viewMax.y + slack;
-    // Quantize depth just like XY. This keeps normalized depth bias and PCSS
-    // scale stable when a dynamic caster moves a small distance along the light.
-    const float requiredDepth = (viewMax.z - viewMin.z + 2.0f * slack) * resolutionScale;
-    const float depthExtent = QuantizeSpan(requiredDepth);
-    const float depthTexel = depthExtent / static_cast<float>(std::max(resolution, 1u));
-    float depthCenter = std::floor(((viewMin.z + viewMax.z) * 0.5f) / depthTexel + 0.5f) * depthTexel;
-    float nearP = depthCenter - depthExtent * 0.5f;
-    float farP = depthCenter + depthExtent * 0.5f;
-    if (nearP < 0.01f) {
-        farP += 0.01f - nearP;
-        nearP = 0.01f;
-    }
+    float nearP;
+    float farP;
+    FitStableDepthBounds(viewMin.z, viewMax.z, slack, resolution, nearP, farP);
 
     const float width = extent;
     const float height = extent;
@@ -153,8 +164,7 @@ void ComputeShadowFrustum(const float lightDir[3],
 
 void ComputeCascadeShadowFrustum(const float lightDir[3],
                                  const float receiverCorners[8][3],
-                                 const float sceneAabbMin[3],
-                                 const float sceneAabbMax[3],
+                                 float casterExtrusionWorld,
                                  std::uint32_t resolution,
                                  float samplingGuardTexels,
                                  bool homogeneousDepth,
@@ -185,42 +195,35 @@ void ComputeCascadeShadowFrustum(const float lightDir[3],
 
     const bool vertical = std::abs(dir.y) > 0.99f;
     const bx::Vec3 worldUp = vertical ? bx::Vec3{0.0f, 0.0f, 1.0f} : bx::Vec3{0.0f, 1.0f, 0.0f};
-    const bx::Vec3 sceneMin{sceneAabbMin[0], sceneAabbMin[1], sceneAabbMin[2]};
-    const bx::Vec3 sceneMax{sceneAabbMax[0], sceneAabbMax[1], sceneAabbMax[2]};
-    const bx::Vec3 sceneHalf = bx::mul(bx::sub(sceneMax, sceneMin), 0.5f);
-    const float eyeDistance = bx::length(sceneHalf) + radius + 100.0f;
+    float receiverMinAlong = 1e30f;
+    float receiverMaxAlong = -1e30f;
+    for (int i = 0; i < 8; ++i) {
+        const bx::Vec3 corner{
+            receiverCorners[i][0], receiverCorners[i][1], receiverCorners[i][2]};
+        const float along = bx::dot(bx::sub(corner, center), dir);
+        receiverMinAlong = std::min(receiverMinAlong, along);
+        receiverMaxAlong = std::max(receiverMaxAlong, along);
+    }
+    const float casterExtrusion = std::isfinite(casterExtrusionWorld)
+        ? std::max(casterExtrusionWorld, 0.0f) : 0.0f;
+    constexpr float kDepthSlack = 1.0f;
+    const float eyeDistance = casterExtrusion - receiverMinAlong + kDepthSlack;
     // Keep transverse light-view coordinates world anchored. Following the
     // receiver center in XY would move the view matrix continuously and defeat
-    // projection snapping; only travel along the light direction is harmless.
+    // projection snapping. Depth depends only on the receiver interval and the
+    // fixed caster extrusion, never on moving scene bounds.
     const float alongLight = bx::dot(center, dir);
     const bx::Vec3 eye = bx::mul(dir, alongLight - eyeDistance);
     const bx::Vec3 target = bx::add(eye, dir);
     bx::mtxLookAt(out.viewMatrix, eye, target, worldUp);
-
-    bx::Vec3 viewMin{ 1e30f,  1e30f,  1e30f};
-    bx::Vec3 viewMax{-1e30f, -1e30f, -1e30f};
-    const bx::Vec3 sceneCorners[8] = {
-        {sceneMin.x, sceneMin.y, sceneMin.z}, {sceneMax.x, sceneMin.y, sceneMin.z},
-        {sceneMin.x, sceneMax.y, sceneMin.z}, {sceneMax.x, sceneMax.y, sceneMin.z},
-        {sceneMin.x, sceneMin.y, sceneMax.z}, {sceneMax.x, sceneMin.y, sceneMax.z},
-        {sceneMin.x, sceneMax.y, sceneMax.z}, {sceneMax.x, sceneMax.y, sceneMax.z},
-    };
-    for (const bx::Vec3& corner : sceneCorners) {
-        ExpandAabb(viewMin, viewMax, TransformPoint(out.viewMatrix, corner));
-    }
 
     const float extent = radius * 2.0f;
     const float texel = extent / resolutionF;
     const bx::Vec3 centerView = TransformPoint(out.viewMatrix, center);
     const float centerX = std::floor(centerView.x / texel + 0.5f) * texel;
     const float centerY = std::floor(centerView.y / texel + 0.5f) * texel;
-    const float slack = 1.0f;
-    float nearP = viewMin.z - slack;
-    float farP = viewMax.z + slack;
-    if (nearP < 0.01f) {
-        farP += 0.01f - nearP;
-        nearP = 0.01f;
-    }
+    constexpr float nearP = 0.01f;
+    const float farP = eyeDistance + receiverMaxAlong + kDepthSlack;
 
     out.orthoWidth = extent;
     out.depthRange = std::max(farP - nearP, 0.01f);

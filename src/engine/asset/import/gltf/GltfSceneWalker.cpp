@@ -102,7 +102,7 @@ void WalkNodes(const std::vector<JsonValue>& nodes,
             if (child.IsNumber()) {
                 WalkNodes(nodes, meshes, accessors, buffers, bufferViews,
                           materials, textures, images, dir,
-                          static_cast<int>(child.number), world, model);
+                          child.IntegerOr(-1), world, model);
             }
         }
     }

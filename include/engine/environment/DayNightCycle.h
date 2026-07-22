@@ -9,7 +9,7 @@ namespace Concord {
 /** Authoring inputs for an automatic time-of-day cycle. */
 struct DayNightConfig {
     /** Real seconds for one full 24-hour cycle. */
-    float secondsPerDay = 120.0f;
+    float secondsPerDay = 86400.0f;
     /** Civil clock hour the cycle starts at, in [0, 24). */
     float startHour = 8.0f;
     /** Multiplies the whole cycle speed; 0 pauses, negative runs time backward. */

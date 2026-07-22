@@ -142,7 +142,7 @@ void DayNightCycle::ApplySky(EnvironmentSettings& settings, float sunElevationDe
         clouds.fireColor = Pack(kFireCore);
         clouds.fireEmission = 1.5f + 3.5f * golden;
     } else {
-        clouds.colorMode = CloudColorMode::Physical;
+        clouds.colorMode = CloudColorMode::Lit;
     }
 }
 

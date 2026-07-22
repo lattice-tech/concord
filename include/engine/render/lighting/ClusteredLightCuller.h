@@ -22,9 +22,8 @@ namespace Concord {
  *
  * This class is pure and backend-free (no bgfx): the render backend calls
  * `Assign` then uploads `Lights()`, `Ranges()` and `Indices()` into GPU
- * buffers/textures. Keeping the assignment here makes it unit-testable without
- * a graphics device (AGENTS.md §5) and gives the later GPU-compute culler a
- * reference to match.
+ * buffers/textures. Keeping the assignment here makes it testable without a
+ * graphics device and provides the reference behavior for the compute culler.
  */
 class ClusteredLightCuller {
 public:
@@ -65,12 +64,16 @@ public:
     /** Light-cluster assignments dropped this frame because a cluster hit capacity. */
     std::uint32_t CappedAssignments() const noexcept { return m_cappedAssignments; }
 
+    /** Input lights omitted because the packed light texture reached capacity. */
+    std::uint32_t DroppedLights() const noexcept { return m_droppedLights; }
+
 private:
     std::vector<GpuLight> m_lights;
     std::vector<ClusterRange> m_ranges;
     std::vector<std::uint32_t> m_indices;
     std::uint32_t m_directionalCount = 0;
     std::uint32_t m_cappedAssignments = 0;
+    std::uint32_t m_droppedLights = 0;
 
     /** Scratch per-cluster bucket reused across frames to avoid reallocation. */
     std::vector<std::vector<std::uint32_t>> m_buckets;

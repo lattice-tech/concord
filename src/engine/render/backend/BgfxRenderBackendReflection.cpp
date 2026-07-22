@@ -129,7 +129,9 @@ std::uint8_t CaptureFaceMask(
 namespace Concord {
 
 void BgfxRenderBackend::RenderReflectionCapture(
-    ViewSlot& slot, const std::vector<MeshDrawCommand>& commands,
+    RenderViewHandle ownerView, ViewSlot& slot,
+    const std::vector<MeshDrawCommand>& commands,
+    const std::vector<RenderParticleEmitter>* particles,
     const RenderLight* lights, std::uint32_t lightCount,
     const SkyEnvironment& environment,
     const RenderSmokeVolume* smokeVolumes, std::uint32_t smokeVolumeCount)
@@ -291,8 +293,7 @@ void BgfxRenderBackend::RenderReflectionCapture(
     (void)completeSlabBox;
     (void)enclosingFound;
 
-    const std::uint32_t capturedLightCount = lights == nullptr
-        ? 0u : std::min(lightCount, kMaxRenderLights);
+    const std::uint32_t capturedLightCount = lights == nullptr ? 0u : lightCount;
     MixSignature(signature, capturedLightCount);
     for (std::uint32_t index = 0; index < capturedLightCount; ++index) {
         const RenderLight& light = lights[index];
@@ -323,6 +324,21 @@ void BgfxRenderBackend::RenderReflectionCapture(
         MixSignatureFloats(signature, volume.windOffset, 3);
         MixSignature(signature, volume.color);
         MixSignatureFloat(signature, volume.density);
+    }
+
+    const std::uint32_t particleCount = particles == nullptr
+        ? 0u : static_cast<std::uint32_t>(particles->size());
+    MixSignature(signature, particleCount);
+    if (particles != nullptr) {
+        for (const RenderParticleEmitter& emitter : *particles) {
+            MixSignature(signature, emitter.emitterKey);
+            MixSignature(signature, emitter.emitterId);
+            MixSignature(signature, emitter.spawnSequence);
+            std::uint64_t timeBits = 0;
+            std::memcpy(&timeBits, &emitter.simulationTime, sizeof(timeBits));
+            MixSignature(signature, timeBits);
+            MixSignatureFloats(signature, emitter.world, 16);
+        }
     }
 
     if (slot.reflectionInitialized && slot.reflectionSignatureValid
@@ -426,6 +442,17 @@ void BgfxRenderBackend::RenderReflectionCapture(
                               faceProjections[face].data());
         bgfx::setViewMode(captureView, bgfx::ViewMode::Sequential);
         bgfx::touch(captureView);
+        ClusterGrid captureGrid;
+        captureGrid.nearPlane = kCaptureNear;
+        captureGrid.farPlane = kCaptureFar;
+        captureGrid.screenWidth = ReflectionCapture::kResolution;
+        captureGrid.screenHeight = ReflectionCapture::kResolution;
+        float faceViewProjection[16];
+        bx::mtxMul(faceViewProjection, faceViews[face].data(), faceProjections[face].data());
+        m_lightCuller.Assign(
+            lights, lightCount, faceViews[face].data(), faceViewProjection, captureGrid);
+        const bool faceClustersReady = m_uniforms.UpdateClustersCpu(
+            slot.reflectionForwardPlus[face], m_lightCuller, captureGrid);
         m_skyRenderer.Draw(captureView, faceViews[face].data(),
                            faceProjections[face].data(), captureCamera.eye,
                            environment, lights, lightCount, true);
@@ -460,6 +487,11 @@ void BgfxRenderBackend::RenderReflectionCapture(
             }
             captureComplete = captureComplete && count == requested;
 
+            if (faceClustersReady) {
+                m_uniforms.SelectClusters(slot.reflectionForwardPlus[face]);
+            } else {
+                m_uniforms.DisableClusters();
+            }
             m_uniforms.ApplyLighting(&captureCamera, lights, lightCount, &environment);
             m_uniforms.ApplyMaterial(batch.material, m_textureCache, flipShadowV,
                                      BGFX_INVALID_HANDLE, nullptr, true);
@@ -513,6 +545,11 @@ void BgfxRenderBackend::RenderReflectionCapture(
                 captureComplete = false;
                 continue;
             }
+            if (faceClustersReady) {
+                m_uniforms.SelectClusters(slot.reflectionForwardPlus[face]);
+            } else {
+                m_uniforms.DisableClusters();
+            }
             m_uniforms.ApplyLighting(&captureCamera, lights, lightCount, &environment);
             m_uniforms.ApplyMaterial(command->material, m_textureCache, flipShadowV,
                                      BGFX_INVALID_HANDLE, nullptr, true);
@@ -535,6 +572,10 @@ void BgfxRenderBackend::RenderReflectionCapture(
             bgfx::setTransform(identity);
             bgfx::setInstanceDataBuffer(&instanceData);
             bgfx::submit(captureView, m_meshProgram.SkinnedProgram());
+        }
+
+        if (particles != nullptr && !particles->empty()) {
+            m_gpuParticles.Draw(ownerView, captureView, *particles);
         }
 
         // Composite local smoke into this face, sequenced after its geometry so

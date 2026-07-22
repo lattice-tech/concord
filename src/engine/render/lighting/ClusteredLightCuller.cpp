@@ -21,22 +21,31 @@ void MulPoint(const float m[16], float x, float y, float z, float w, float out[4
 void ClusteredLightCuller::PackOnly(const RenderLight* lights, std::uint32_t count)
 {
     m_lights.clear();
+    m_ranges.clear();
+    m_indices.clear();
     m_directionalCount = 0;
+    m_cappedAssignments = 0;
+    m_droppedLights = 0;
     if (lights == nullptr || count == 0) {
         return;
     }
-    m_lights.reserve(count);
-    for (std::uint32_t i = 0; i < count; ++i) {
+    m_lights.reserve(std::min(count, ClusterGrid::kMaxPackedLights));
+    for (std::uint32_t i = 0;
+         i < count && m_lights.size() < ClusterGrid::kMaxPackedLights;
+         ++i) {
         if (lights[i].type == LightType::Directional) {
-            m_lights.push_back(GpuLight::Pack(lights[i]));
+            m_lights.push_back(GpuLight::Pack(lights[i], i));
             ++m_directionalCount;
         }
     }
-    for (std::uint32_t i = 0; i < count; ++i) {
+    for (std::uint32_t i = 0;
+         i < count && m_lights.size() < ClusterGrid::kMaxPackedLights;
+         ++i) {
         if (lights[i].type != LightType::Directional) {
-            m_lights.push_back(GpuLight::Pack(lights[i]));
+            m_lights.push_back(GpuLight::Pack(lights[i], i));
         }
     }
+    m_droppedLights = count - static_cast<std::uint32_t>(m_lights.size());
 }
 
 void ClusteredLightCuller::Assign(const RenderLight* lights, std::uint32_t count,
@@ -47,6 +56,7 @@ void ClusteredLightCuller::Assign(const RenderLight* lights, std::uint32_t count
     m_indices.clear();
     m_directionalCount = 0;
     m_cappedAssignments = 0;
+    m_droppedLights = 0;
 
     const std::size_t clusterCount = ClusterGrid::kClusterCount;
     m_ranges.assign(clusterCount, ClusterRange{});
@@ -62,20 +72,26 @@ void ClusteredLightCuller::Assign(const RenderLight* lights, std::uint32_t count
     }
 
     // Pack directional lights first (applied to every fragment), then locals.
-    m_lights.reserve(count);
-    for (std::uint32_t i = 0; i < count; ++i) {
+    m_lights.reserve(std::min(count, ClusterGrid::kMaxPackedLights));
+    for (std::uint32_t i = 0;
+         i < count && m_lights.size() < ClusterGrid::kMaxPackedLights;
+         ++i) {
         if (lights[i].type == LightType::Directional) {
-            m_lights.push_back(GpuLight::Pack(lights[i]));
+            m_lights.push_back(GpuLight::Pack(lights[i], i));
             ++m_directionalCount;
         }
     }
     std::vector<std::uint32_t> localSource; // original index of each packed local light
-    for (std::uint32_t i = 0; i < count; ++i) {
+    localSource.reserve(ClusterGrid::kMaxPackedLights - m_directionalCount);
+    for (std::uint32_t i = 0;
+         i < count && m_lights.size() < ClusterGrid::kMaxPackedLights;
+         ++i) {
         if (lights[i].type != LightType::Directional) {
-            m_lights.push_back(GpuLight::Pack(lights[i]));
+            m_lights.push_back(GpuLight::Pack(lights[i], i));
             localSource.push_back(i);
         }
     }
+    m_droppedLights = count - static_cast<std::uint32_t>(m_lights.size());
 
     // Assign each local light to the clusters its bounding sphere touches.
     const float fw = static_cast<float>(grid.screenWidth);

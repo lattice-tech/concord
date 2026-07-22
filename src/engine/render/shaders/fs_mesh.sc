@@ -376,7 +376,7 @@ float computeShadow(vec3 wpos, vec3 normal)
 	return visibility;
 }
 
-// ---- Forward+ clustered lighting (constants mirror Concord::ClusterGrid) ----
+// Forward+ clustered-light resources; constants mirror Concord::ClusterGrid.
 SAMPLER2D(s_lightData, 9);      // 4 texels/light: posType, dirRange, colorLinear+intensity, spot
 SAMPLER2D(s_clusterRanges, 10); // per-cluster (offset, count) in R,G
 SAMPLER2D(s_lightIndices, 11);  // flat local-light index list (R)
@@ -387,6 +387,7 @@ uniform vec4 u_clusterParams;   // x mode(0 classic,1 clustered), y dirCount, z 
 #define CLUSTER_DIM_Z 24
 #define CLUSTER_INDEX_TEX_W 1024
 #define CLUSTER_MAX_ITER 64
+#define MAX_PACKED_LIGHTS 256
 
 int ClusterSlice(float viewZ, float nearP, float farP)
 {
@@ -514,22 +515,24 @@ void main()
 		vec3 Lo = vec3_splat(0.0);
 		if (u_clusterParams.x > 0.5)
 		{
-			// ===== Forward+ clustered path =====
-			int dirCount = int(u_clusterParams.y);
+			int dirCount = clamp(int(u_clusterParams.y), 0, MAX_PACKED_LIGHTS);
 			for (int d = 0; d < dirCount; ++d)
 			{
 				vec4 pt = texelFetch(s_lightData, ivec2(0, d), 0);
 				vec4 dr = texelFetch(s_lightData, ivec2(1, d), 0);
 				vec4 cl = texelFetch(s_lightData, ivec2(2, d), 0);
 				vec4 sp = texelFetch(s_lightData, ivec2(3, d), 0);
+				float visibility = abs(sp.w - shadowCasterIndex) < 0.5
+					? shadowVisibility : 1.0;
 				Lo += ShadeLight(pt.w, pt.xyz, dr.xyz, dr.w, cl.rgb, cl.w, sp.x, sp.y, sp.z,
-					N, V, v_wpos, albedo, metallic, roughness, F0, ndv, shadowVisibility);
+					N, V, v_wpos, albedo, metallic, roughness, F0, ndv, visibility);
 			}
 			vec4 clip = mul(u_viewProj, vec4(v_wpos, 1.0));
-			vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+			vec2 clusterUv = clip.xy / clip.w * 0.5 + 0.5;
+			clusterUv.y = 1.0 - clusterUv.y;
 			vec4 vpos = mul(u_view, vec4(v_wpos, 1.0));
-			int tx = clamp(int(uv.x * float(CLUSTER_DIM_X)), 0, CLUSTER_DIM_X - 1);
-			int ty = clamp(int(uv.y * float(CLUSTER_DIM_Y)), 0, CLUSTER_DIM_Y - 1);
+			int tx = clamp(int(clusterUv.x * float(CLUSTER_DIM_X)), 0, CLUSTER_DIM_X - 1);
+			int ty = clamp(int(clusterUv.y * float(CLUSTER_DIM_Y)), 0, CLUSTER_DIM_Y - 1);
 			int slice = ClusterSlice(vpos.z, u_clusterParams.z, u_clusterParams.w);
 			vec4 rng = texelFetch(s_clusterRanges, ivec2(ty * CLUSTER_DIM_X + tx, slice), 0);
 			int off = int(rng.x + 0.5);
@@ -538,8 +541,9 @@ void main()
 			{
 				if (k >= cnt) { break; }
 				int flatIdx = off + k;
-				int li = int(texelFetch(s_lightIndices,
-					ivec2(flatIdx % CLUSTER_INDEX_TEX_W, flatIdx / CLUSTER_INDEX_TEX_W), 0).x + 0.5);
+				int li = clamp(int(texelFetch(s_lightIndices,
+					ivec2(flatIdx % CLUSTER_INDEX_TEX_W, flatIdx / CLUSTER_INDEX_TEX_W), 0).x + 0.5),
+					0, MAX_PACKED_LIGHTS - 1);
 				vec4 pt = texelFetch(s_lightData, ivec2(0, li), 0);
 				vec4 dr = texelFetch(s_lightData, ivec2(1, li), 0);
 				vec4 cl = texelFetch(s_lightData, ivec2(2, li), 0);

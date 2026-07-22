@@ -10,10 +10,8 @@ namespace Concord {
 
 /** Selects how authored cloud colors are produced. */
 enum class CloudColorMode : std::uint8_t {
-    /** Derive scattering colors from the atmosphere and active sun. */
-    Physical = 0,
-    /** Use explicit lit, shadow, and ambient colors. */
-    Artistic,
+    /** Use lit and shadow colors with no emissive contribution. */
+    Lit = 0,
     /** Use explicit emissive fire and smoke colors. */
     Fire,
 };
@@ -37,9 +35,7 @@ struct VolumetricCloudSettings {
     /** Enables the cloud layer. */
     bool enabled = true;
     /** Cloud color and lighting model. */
-    CloudColorMode colorMode = CloudColorMode::Physical;
-    /** Stable noise and weather-map seed. */
-    std::uint32_t seed = 1;
+    CloudColorMode colorMode = CloudColorMode::Lit;
     /** Fraction of the weather map covered by clouds in [0, 1]. */
     float coverage = 0.45f;
     /** Optical density multiplier. */
@@ -54,40 +50,20 @@ struct VolumetricCloudSettings {
     float erosion = 0.55f;
     /** Fine detail strength in [0, 1]. */
     float detail = 0.5f;
-    /** Anvil shaping amount in [0, 1]. */
-    float anvil = 0.0f;
-    /** Precipitation/storm loading in [0, 1]. */
-    float precipitation = 0.0f;
     /** Wind direction clockwise from geographic north. */
     float windDirectionDegrees = 0.0f;
     /** Horizontal wind speed in kilometers per second. */
     float windSpeedKmPerSecond = 0.01f;
-    /** Vertical evolution speed in kilometers per second. */
-    float verticalWindKmPerSecond = 0.0f;
-    /** Deterministic weather-map phase in [0, 1). */
-    float weatherPhase = 0.0f;
-    /** Weather evolution cycles per simulation hour. */
-    float weatherCyclesPerHour = 0.05f;
     /** Physical/artistic lit cloud color, packed 0xRRGGBBAA in sRGB. */
     std::uint32_t litColor = 0xfff4e6ffu;
     /** Artistic cloud shadow color, packed 0xRRGGBBAA in sRGB. */
     std::uint32_t shadowColor = 0x687080ffu;
-    /** Artistic ambient cloud color, packed 0xRRGGBBAA in sRGB. */
-    std::uint32_t ambientColor = 0x91a7c7ffu;
     /** Fire-mode emissive core color, packed 0xRRGGBBAA in sRGB. */
     std::uint32_t fireColor = 0xff6a18ffu;
-    /** Fire-mode smoke color, packed 0xRRGGBBAA in sRGB. */
-    std::uint32_t fireSmokeColor = 0x211a1affu;
     /** Fire-mode emissive luminance multiplier. */
     float fireEmission = 4.0f;
-    /** Forward-scattering phase anisotropy in [-0.99, 0.99]. */
-    float phaseAnisotropy = 0.65f;
     /** Silver-lining strength in [0, 4]. */
     float silverLining = 1.0f;
-    /** Number of intended primary ray-march samples in [8, 256]. */
-    std::uint16_t primarySteps = 64;
-    /** Number of intended light-cone samples in [1, 32]. */
-    std::uint8_t lightSteps = 6;
 };
 
 /** Scene-wide exponential height fog, excluding local volumetric smoke. */

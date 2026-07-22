@@ -16,10 +16,9 @@ namespace Concord {
  * clusters their volume touches; the mesh shader maps a fragment to its cluster
  * and shades only that cluster's lights.
  *
- * This header is the single source of truth for the grid constants shared by
- * the C++ culler and the shaders (mirrored into `clusters.sh`), and it is pure
- * and dependency-free so the mapping math can be unit-tested without a device.
- * (AGENTS.md §5: reusable, module-agnostic.)
+ * The matching constants in `fs_mesh.sc` and `cs_light_cull.sc` must change
+ * with this type. This header remains backend-free so its mapping math can be
+ * exercised without a graphics device.
  */
 struct ClusterGrid {
     /** Screen tiles across X and Y, and depth slices along Z. */
@@ -33,18 +32,12 @@ struct ClusterGrid {
     /** Maximum local lights assigned to a single cluster (per-cluster capacity). */
     static constexpr std::uint32_t kMaxLightsPerCluster = 64;
 
+    /** Maximum lights represented by the packed Forward+ light-data texture. */
+    static constexpr std::uint32_t kMaxPackedLights = 256;
+
     /** Camera near/far in view space; set per view before mapping. */
     float nearPlane = 0.1f;
     float farPlane = 200.0f;
-
-    /**
-     * tan(fovY/2) and aspect (width/height); only needed by the GPU compute
-     * culler, which reconstructs each cluster's view-space frustum slice
-     * on-device rather than receiving a CPU-built AABB. The CPU culler does not
-     * use these (it works directly from the view-projection matrix).
-     */
-    float tanHalfFovY = 0.5773503f; // ~60 degree vertical FOV default
-    float aspect = 16.0f / 9.0f;
 
     /** View resolution in pixels; tiles cover it uniformly. */
     std::uint32_t screenWidth = 1;

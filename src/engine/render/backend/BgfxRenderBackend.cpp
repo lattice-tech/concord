@@ -1,6 +1,7 @@
 #include "engine/render/backend/BgfxRenderBackend.h"
 
 #include "engine/debug/Logger.h"
+#include "engine/particles/ParticleSimulationRuntime.h"
 #include "engine/render/backend/BgfxLogSink.h"
 #include "engine/render/backend/BgfxMathConverters.h"
 #include "engine/utils/PrintString.h"
@@ -25,14 +26,14 @@ namespace Concord {
 
 BgfxRenderBackend::BgfxRenderBackend() = default;
 
-BgfxRenderBackend::~BgfxRenderBackend()
+BgfxRenderBackend::~BgfxRenderBackend() noexcept
 {
     Shutdown();
 }
 
 bool BgfxRenderBackend::Prepare(const RenderInit& init)
 {
-    if (m_initialized) {
+    if (m_bgfxInitialized || m_initialized) {
         return false;
     }
 
@@ -50,6 +51,8 @@ bool BgfxRenderBackend::Init(const RenderInit& init)
         Debug::Logger::Error("Render", "Prepare must succeed before Init");
         return false;
     }
+    Particles::ParticleSimulationRuntime::SetGpuAvailability(
+        Particles::GpuParticleAvailability::Unavailable);
 
     // A genuinely headless bgfx::init (platformData.nwh left null) does
     // succeed on this build, but it also strips BGFX_CAPS_SWAP_CHAIN from
@@ -71,6 +74,7 @@ bool BgfxRenderBackend::Init(const RenderInit& init)
     initInfo.resolution.width = 8;
     initInfo.resolution.height = 8;
     initInfo.resolution.reset = BGFX_RESET_NONE;
+    initInfo.resolution.maxFrameLatency = kMaxFrameLatency;
 
     if (!bgfx::init(initInfo)) {
         Debug::Logger::Error("Render", "bgfx::init failed (Vulkan required)");
@@ -78,6 +82,7 @@ bool BgfxRenderBackend::Init(const RenderInit& init)
         m_prepared = false;
         return false;
     }
+    m_bgfxInitialized = true;
 
     // Hard gate: Concord embeds SPIR-V shaders only. Never run on D3D/GL.
     if (bgfx::getRendererType() != bgfx::RendererType::Vulkan) {
@@ -86,6 +91,7 @@ bool BgfxRenderBackend::Init(const RenderInit& init)
             "engine is Vulkan-only; bgfx came up as %s — refusing to continue",
             bgfx::getRendererName(bgfx::getRendererType()));
         bgfx::shutdown();
+        m_bgfxInitialized = false;
         m_deviceWindow.Close();
         m_prepared = false;
         return false;
@@ -96,6 +102,7 @@ bool BgfxRenderBackend::Init(const RenderInit& init)
         Debug::Logger::Error("Render",
                              "Vulkan lacks a required capability (multi-window swap chain and/or instancing)");
         bgfx::shutdown();
+        m_bgfxInitialized = false;
         m_deviceWindow.Close();
         m_prepared = false;
         return false;
@@ -108,6 +115,11 @@ bool BgfxRenderBackend::Init(const RenderInit& init)
     m_viewBlocks.Configure(kViewsPerWindow, bgfx::getCaps()->limits.maxViews,
                            kInvalidRenderView);
     bgfx::setDebug(BGFX_DEBUG_PROFILER);
+
+    const bool gpuParticlesReady = m_gpuParticles.EnsureReady();
+    Particles::ParticleSimulationRuntime::SetGpuAvailability(
+        gpuParticlesReady ? Particles::GpuParticleAvailability::Available
+                          : Particles::GpuParticleAvailability::Unavailable);
 
     m_initialized = true;
     Debug::Logger::Info("Render", "requested %s, using %s",
@@ -130,6 +142,7 @@ bool BgfxRenderBackend::EnsureResetState(MsaaLevel level, bool vsync,
         previousViews.reserve(m_views.size());
         for (const auto& [view, slot] : m_views) {
             RenderViewInit oldInit;
+            oldInit.window = slot.window;
             oldInit.nativeWindowHandle = slot.nativeWindowHandle;
             oldInit.width = slot.width;
             oldInit.height = slot.height;
@@ -192,6 +205,7 @@ bool BgfxRenderBackend::RecreateAllViews(RenderViewHandle changedView,
             ? *changedInit
             : RenderViewInit{};
         if (changedInit == nullptr || view != changedView) {
+            init.window = slot.window;
             init.nativeWindowHandle = slot.nativeWindowHandle;
             init.width = slot.width;
             init.height = slot.height;
@@ -216,6 +230,7 @@ void BgfxRenderBackend::Frame()
         return;
     }
     bgfx::frame();
+    m_gpuParticles.EndFrame();
     const bgfx::Stats* stats = bgfx::getStats();
     m_frameStats = {};
     if (stats == nullptr) {
@@ -262,42 +277,51 @@ void BgfxRenderBackend::Frame()
     }
 }
 
-void BgfxRenderBackend::Shutdown()
+std::uint32_t BgfxRenderBackend::NativeWindowRetirementFrames() const noexcept
 {
-    if (!m_initialized) {
-        m_deviceWindow.Close();
-        m_prepared = false;
-        m_frameStats = {};
-        return;
-    }
-    m_meshProgram.Shutdown();
-    m_uniforms.Shutdown();
-    m_postProcess.Shutdown();
-    m_bloom.Shutdown();
-    m_smaa.Shutdown();
-    m_skyRenderer.Shutdown();
-    m_volumeCloud.Shutdown();
-    m_volumeSmoke.Shutdown();
-    m_gpuLightCuller.Shutdown();
-    m_shadowMap.Shutdown();
-    m_debugText.Shutdown();
-    m_uiRenderer.Shutdown();
-    m_textureCache.Clear();
-    m_pendingDraws.clear();
-    m_meshes.Clear();
-    for (auto& [view, slot] : m_views) {
-        if (slot.shadowReady) {
-            for (std::uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
-                m_shadowMap.DestroyViewTarget(slot.shadowFbs[cascade], slot.shadowTextures[cascade]);
-            }
-            slot.shadowReady = false;
-        }
-        DestroyViewTargets(slot);
-    }
-    m_views.clear();
-    m_viewBlocks.Reset();
+    return kNativeWindowRetirementFrames;
+}
 
-    bgfx::shutdown();
+void BgfxRenderBackend::Shutdown() noexcept
+{
+    if (m_bgfxInitialized) {
+        m_meshProgram.Shutdown();
+        for (auto& [view, slot] : m_views) {
+            DestroyForwardPlusContexts(slot);
+        }
+        m_uniforms.Shutdown();
+        m_postProcess.Shutdown();
+        m_bloom.Shutdown();
+        m_smaa.Shutdown();
+        m_skyRenderer.Shutdown();
+        m_volumeCloud.Shutdown();
+        m_volumeSmoke.Shutdown();
+        m_gpuLightCuller.Shutdown();
+        m_gpuParticles.Shutdown();
+        m_shadowMap.Shutdown();
+        m_debugText.Shutdown();
+        m_uiRenderer.Shutdown();
+        m_textureCache.Clear();
+        m_pendingDraws.clear();
+        m_pendingParticleEmitters.clear();
+        m_meshes.Clear();
+        for (auto& [view, slot] : m_views) {
+            if (slot.shadowReady) {
+                for (std::uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
+                    m_shadowMap.DestroyViewTarget(slot.shadowFbs[cascade], slot.shadowTextures[cascade]);
+                }
+                slot.shadowReady = false;
+            }
+            DestroyViewTargets(slot);
+        }
+        m_views.clear();
+        m_viewBlocks.Reset();
+
+        bgfx::shutdown();
+        m_bgfxInitialized = false;
+    }
+    Particles::ParticleSimulationRuntime::SetGpuAvailability(
+        Particles::GpuParticleAvailability::Unknown);
     m_deviceWindow.Close();
     m_initialized = false;
     m_prepared = false;

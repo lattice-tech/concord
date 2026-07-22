@@ -158,6 +158,7 @@ void EngineLoop::Impl::Run()
                 }
                 if (m_backendReady && slot.view != kInvalidRenderView) {
                     RenderViewInit viewInit;
+                    viewInit.window = id;
                     viewInit.nativeWindowHandle = slot.window->NativeHandle();
                     viewInit.width = static_cast<std::uint32_t>(newWidth);
                     viewInit.height = static_cast<std::uint32_t>(newHeight);
@@ -236,6 +237,9 @@ void EngineLoop::Impl::Run()
                     command.boneCount = instance.boneCount;
                     backend->SubmitMesh(slot.view, command);
                 }
+                for (const RenderParticleEmitter& emitter : snapshot->particleEmitters) {
+                    backend->SubmitParticleEmitter(slot.view, emitter);
+                }
                 backend->RenderView(slot.view, snapshot->hasCamera ? &snapshot->camera : nullptr,
                                     snapshot->lights.data(),
                                     static_cast<std::uint32_t>(snapshot->lights.size()),
@@ -250,6 +254,8 @@ void EngineLoop::Impl::Run()
             requestStats.queueLatencyMs = std::max(requestStats.queueLatencyMs, phaseRequests.queueLatencyMs);
             if (m_backendReady) {
                 backend->Frame();
+                ++m_backendFrameGeneration;
+                DrainRetiredNativeWindows(false);
             }
             const BackendFrameStats backendStats = m_backendReady ? backend->Stats() : BackendFrameStats{};
             const auto presentEnd = SteadyClock::now();
@@ -316,35 +322,55 @@ void EngineLoop::Impl::Run()
         Debug::Logger::Error("EngineLoop", "render loop terminated after an unknown exception");
     }
 
+    const std::uint64_t eventGeneration = m_eventGeneration.exchange(0);
     m_running.store(false);
-    EventDetail::EventBusCore::Shutdown(m_eventGeneration.exchange(0));
+    m_queueCv.notify_all();
+    m_openCv.notify_all();
+    RejectPendingRequests();
+    RejectMeshRequests();
+    EventDetail::EventBusCore::Shutdown(eventGeneration);
     for (auto& [id, slot] : windows) {
         try {
             m_eventRouter.UnregisterWindow(id);
-            if (backend) {
-                CloseWindow(slot, *backend, m_backendReady);
-            } else {
-                slot.window->Close();
+            if (slot.window) {
+                slot.window->SetRelativeMouseMode(false);
+                slot.window->SetVisible(false);
             }
         } catch (...) {
-            Debug::Logger::Error("EngineLoop", "window cleanup failed for window %llu",
+            Debug::Logger::Error("EngineLoop", "window deactivation failed for window %llu",
                                  static_cast<unsigned long long>(id));
         }
-        MarkWindowClosed(id);
-    }
-    windows.clear();
-    m_eventRouter.Reset();
-    if (backend) {
         try {
-            backend->Shutdown();
+            MarkWindowClosed(id);
         } catch (...) {
-            Debug::Logger::Error("EngineLoop", "render backend cleanup failed");
+            Debug::Logger::Error("EngineLoop", "failed to clear public state for window %llu",
+                                 static_cast<unsigned long long>(id));
         }
     }
+    try {
+        m_eventRouter.Reset();
+    } catch (...) {
+        Debug::Logger::Error("EngineLoop", "input router cleanup failed");
+    }
+
+    if (backend) {
+        backend->Shutdown();
+    }
+
+    for (auto& entry : windows) {
+        WindowSlot& slot = entry.second;
+        if (slot.window) {
+            slot.window->Close();
+        }
+    }
+    windows.clear();
+    if (m_pendingWindow) {
+        m_pendingWindow->Close();
+        m_pendingWindow.reset();
+    }
+    DrainRetiredNativeWindows(true);
     m_backendPtr = nullptr;
     m_backendReady = false;
-    RejectPendingRequests();
-    RejectMeshRequests();
     if (sdlInitialized) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
     }

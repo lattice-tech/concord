@@ -34,15 +34,14 @@ struct ShadowFrustumResult {
 /**
  * Builds one stable CSM projection around eight world-space receiver corners.
  * XY coverage uses a rotation-invariant bounding sphere and texel snapping;
- * light-space depth still includes the complete scene AABB so off-screen
- * geometry can cast into the visible camera interval. `samplingGuardTexels`
- * reserves an inset for PCSS taps, receiver bias and center snapping so filter
- * reads never depend on clamped shadow-map edge texels.
+ * light-space depth covers the receiver interval plus a fixed upstream caster
+ * extrusion, so moving geometry cannot change the projection of static shadows.
+ * `samplingGuardTexels` reserves an inset for PCSS taps, receiver bias and
+ * center snapping so filter reads never depend on clamped map-edge texels.
  */
 void ComputeCascadeShadowFrustum(const float lightDir[3],
                                  const float receiverCorners[8][3],
-                                 const float sceneAabbMin[3],
-                                 const float sceneAabbMax[3],
+                                 float casterExtrusionWorld,
                                  std::uint32_t resolution,
                                  float samplingGuardTexels,
                                  bool homogeneousDepth,

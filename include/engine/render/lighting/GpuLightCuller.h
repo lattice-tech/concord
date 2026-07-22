@@ -11,18 +11,12 @@
 namespace Concord {
 
 /**
- * GPU compute Forward+ light culler (Phase 3): dispatches one thread per
- * cluster to build the same per-cluster (offset,count) range texture and flat
- * light-index texture the CPU `ClusteredLightCuller` produces, so `fs_mesh`
- * consumes either backend's output identically (see design.md "Components and
- * Interfaces"). The light-data texture itself is still packed and uploaded on
- * the CPU (cheap, O(lights)); only the O(lights x clusters) assignment work
- * moves to the GPU.
+ * Dispatches Forward+ cluster assignment on the render thread.
  *
- * Falls back cleanly: `Supported()` reports whether the active backend
- * advertises compute; when false (or `EnsureReady` fails) the backend must keep
- * using the CPU `ClusteredLightCuller` (Requirement 5.4). All methods run on
- * the render thread.
+ * Packed lights and destination textures are supplied per camera so multiple
+ * windows and reflection views cannot overwrite each other's cluster lists.
+ * Unsupported compute devices and resource-creation failures are reported to
+ * the backend, which performs the same assignment with ClusteredLightCuller.
  */
 class GpuLightCuller {
 public:
@@ -44,20 +38,13 @@ public:
     /** Whether EnsureReady has succeeded and Cull can run. */
     bool Ready() const noexcept { return m_ready; }
 
-    /** Output range texture (RGBA32F, one texel per cluster: offset,count). */
-    bgfx::TextureHandle RangeTexture() const noexcept { return m_rangeTex; }
-
-    /** Output flat light-index texture (R32F, 1024 wide). */
-    bgfx::TextureHandle IndexTexture() const noexcept { return m_indexTex; }
-
     /**
-     * Dispatches the cull compute on `view` (a dedicated bgfx view id, lower
-     * than the scene view so results are ready when it samples them).
-     * `lightDataTex` is the CPU-packed light data texture (same layout
-     * GpuLight::Pack produces); `lightCount`/`directionalCount` describe it.
-     * A no-op when not Ready.
+     * Dispatches into the supplied range and index images. The images must
+     * belong to the same camera context as lightDataTex and remain alive until
+     * that camera's mesh submissions finish.
      */
     void Cull(RenderViewHandle view, bgfx::TextureHandle lightDataTex,
+              bgfx::TextureHandle rangeTex, bgfx::TextureHandle indexTex,
               std::uint32_t lightCount, std::uint32_t directionalCount,
               const float viewMatrix[16], const float viewProj[16],
               const ClusterGrid& grid);
@@ -70,11 +57,8 @@ private:
     bgfx::ProgramHandle m_program = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle m_sLightData = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle m_uCullParams = BGFX_INVALID_HANDLE;
-    bgfx::UniformHandle m_uCullScreen = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle m_uCullView = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle m_uCullViewProj = BGFX_INVALID_HANDLE;
-    bgfx::TextureHandle m_rangeTex = BGFX_INVALID_HANDLE;
-    bgfx::TextureHandle m_indexTex = BGFX_INVALID_HANDLE;
 };
 
 } // namespace Concord

@@ -20,10 +20,7 @@ void main()
 	float radius = sqrt(r2);
 	float edgeWidth = max(fwidth(radius), 0.0015);
 
-	// Multi-lobe energy profile (UE/Godot-style soft sprite, no hard ring):
-	//  - hot core: tight Gaussian for bloom seed
-	//  - mid body: broader falloff for readable shape
-	//  - wide halo: soft outer glow that blooms into a haze
+	// Three Gaussian scales preserve a bright center while removing a hard edge.
 	float core = exp(-r2 * 42.0);
 	float body = exp(-r2 * 9.5);
 	float halo = exp(-r2 * 2.1);

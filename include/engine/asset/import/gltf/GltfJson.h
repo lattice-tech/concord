@@ -1,7 +1,9 @@
 #ifndef CONCORD_GLTF_JSON_H
 #define CONCORD_GLTF_JSON_H
 
+#include <cmath>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -45,10 +47,20 @@ struct JsonValue {
 
     int IntOr(std::string_view key, int fallback) const
     {
-        if (const JsonValue* v = Find(key); v != nullptr && v->IsNumber()) {
-            return static_cast<int>(v->number);
+        if (const JsonValue* v = Find(key); v != nullptr) {
+            return v->IntegerOr(fallback);
         }
         return fallback;
+    }
+
+    int IntegerOr(int fallback) const
+    {
+        if (!IsNumber() || !std::isfinite(number) || std::trunc(number) != number ||
+            number < static_cast<double>(std::numeric_limits<int>::min()) ||
+            number > static_cast<double>(std::numeric_limits<int>::max())) {
+            return fallback;
+        }
+        return static_cast<int>(number);
     }
 
     double NumOr(std::string_view key, double fallback) const

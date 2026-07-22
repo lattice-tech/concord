@@ -18,6 +18,13 @@ namespace Concord {
  * (typically from Game / Scene OnUpdate). Contexts are ordered by priority
  * (descending); within the same priority, later pushes win.
  *
+ * Triggered physical inputs are hidden from lower contexts even when those
+ * contexts bind them to different action or axis names. Modal contexts may
+ * block every lower context through `InputContext::blocksLowerContexts`.
+ * Pushing or popping a context changes held state immediately but never
+ * synthesizes press/release edges; modal owners cancel active gestures when
+ * their context changes.
+ *
  * Physical inputs are only Concord `Key` / `MouseButton` — never SDL.
  */
 class CENGINE_API InputActions {
@@ -37,11 +44,11 @@ public:
     static bool IsActionDown(const ActionId& action);
     static bool IsActionDown(std::string_view action);
 
-    /** True only on the frame the action went from up to down (unconsumed). */
+    /** True on a visible binding's physical up-to-down edge (unconsumed). */
     static bool WasActionPressed(const ActionId& action);
     static bool WasActionPressed(std::string_view action);
 
-    /** True only on the frame the action went from down to up. */
+    /** True on a visible, previously-held binding's physical release edge. */
     static bool WasActionReleased(const ActionId& action);
     static bool WasActionReleased(std::string_view action);
 

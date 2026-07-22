@@ -2,10 +2,15 @@
 
 #include "engine/debug/Logger.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <new>
+#include <stdexcept>
+#include <unordered_set>
 #include <vector>
 
 namespace Concord::UI {
@@ -15,6 +20,85 @@ namespace {
 // 'C','U','I','1' as a little-endian tag, plus a version guard.
 constexpr std::uint32_t kMagic = 0x31495543u;
 constexpr std::uint32_t kVersion = 1u;
+constexpr std::size_t kHeaderBytes = sizeof(std::uint32_t) * 3u;
+constexpr std::size_t kWidgetFixedBytes = 35u;
+
+bool CheckedAdd(std::size_t a, std::size_t b, std::size_t& out) noexcept
+{
+    if (b > std::numeric_limits<std::size_t>::max() - a) {
+        return false;
+    }
+    out = a + b;
+    return true;
+}
+
+bool CheckedMultiply(std::size_t a, std::size_t b, std::size_t& out) noexcept
+{
+    if (a != 0u && b > std::numeric_limits<std::size_t>::max() / a) {
+        return false;
+    }
+    out = a * b;
+    return true;
+}
+
+bool IsValid(WidgetKind kind) noexcept
+{
+    return kind == WidgetKind::Panel || kind == WidgetKind::Label
+        || kind == WidgetKind::Button;
+}
+
+bool IsValid(Align align) noexcept
+{
+    return align == Align::Start || align == Align::Center || align == Align::End;
+}
+
+bool ValidateWidget(const Widget& widget,
+                    std::unordered_set<std::uint32_t>& buttonIds)
+{
+    if (!IsValid(widget.kind) || !IsValid(widget.hAlign) || !IsValid(widget.vAlign)
+        || !std::isfinite(widget.rect.x) || !std::isfinite(widget.rect.y)
+        || !std::isfinite(widget.rect.width) || !std::isfinite(widget.rect.height)
+        || !std::isfinite(widget.fontScale) || widget.fontScale <= 0.0f
+        || widget.rect.width <= 0.0f
+        || widget.text.size() > UiDocumentIO::kMaxWidgetTextBytes) {
+        return false;
+    }
+
+    // A zero-height label is an established intrinsic single-line shorthand.
+    // Panels and buttons must have a positive interactive/painted area.
+    if ((widget.kind == WidgetKind::Label && widget.rect.height < 0.0f)
+        || (widget.kind != WidgetKind::Label && widget.rect.height <= 0.0f)) {
+        return false;
+    }
+    if (widget.kind == WidgetKind::Button) {
+        return widget.id != 0u && buttonIds.insert(widget.id).second;
+    }
+    return widget.id == 0u;
+}
+
+bool ValidateDocument(const UiDocument& document, std::size_t& encodedBytes)
+{
+    if (document.widgets.size() > UiDocumentIO::kMaxWidgetCount) {
+        return false;
+    }
+
+    std::size_t fixedBytes = 0;
+    if (!CheckedMultiply(document.widgets.size(), kWidgetFixedBytes, fixedBytes)
+        || !CheckedAdd(kHeaderBytes, fixedBytes, encodedBytes)) {
+        return false;
+    }
+
+    std::unordered_set<std::uint32_t> buttonIds;
+    buttonIds.reserve(document.widgets.size());
+    for (const Widget& widget : document.widgets) {
+        if (!ValidateWidget(widget, buttonIds)
+            || !CheckedAdd(encodedBytes, widget.text.size(), encodedBytes)
+            || encodedBytes > UiDocumentIO::kMaxFileBytes) {
+            return false;
+        }
+    }
+    return true;
+}
 
 /** Minimal little-endian append-only writer over a byte buffer. */
 struct Writer {
@@ -50,14 +134,19 @@ struct Reader {
 
     bool Ok() const { return ok; }
 
+    std::size_t Remaining() const noexcept
+    {
+        return pos <= size ? size - pos : 0u;
+    }
+
     std::uint8_t GetU8()
     {
-        if (pos + 1 > size) { ok = false; return 0; }
+        if (Remaining() < 1u) { ok = false; return 0; }
         return data[pos++];
     }
     std::uint32_t GetU32()
     {
-        if (pos + 4 > size) { ok = false; return 0; }
+        if (Remaining() < 4u) { ok = false; return 0; }
         const std::uint32_t v = static_cast<std::uint32_t>(data[pos])
             | (static_cast<std::uint32_t>(data[pos + 1]) << 8)
             | (static_cast<std::uint32_t>(data[pos + 2]) << 16)
@@ -75,19 +164,28 @@ struct Reader {
     std::string GetStr()
     {
         const std::uint32_t len = GetU32();
-        if (!ok || pos + len > size) { ok = false; return {}; }
+        if (!ok || len > UiDocumentIO::kMaxWidgetTextBytes
+            || static_cast<std::size_t>(len) > Remaining()) {
+            ok = false;
+            return {};
+        }
         std::string s(reinterpret_cast<const char*>(data + pos), len);
         pos += len;
         return s;
     }
 };
 
-} // namespace
-
-bool UiDocumentIO::Save(const UiDocument& document, const std::string& path)
+bool SaveDocument(const UiDocument& document, const std::string& path)
 {
+    std::size_t encodedBytes = 0;
+    if (!ValidateDocument(document, encodedBytes)) {
+        Debug::Logger::Error("UI", "cui save: invalid or oversized document for '%s'",
+                             path.c_str());
+        return false;
+    }
+
     Writer w;
-    w.buf.reserve(16 + document.widgets.size() * 32);
+    w.buf.reserve(encodedBytes);
     w.PutU32(kMagic);
     w.PutU32(kVersion);
     w.PutU32(static_cast<std::uint32_t>(document.widgets.size()));
@@ -132,23 +230,23 @@ bool UiDocumentIO::Save(const UiDocument& document, const std::string& path)
     return true;
 }
 
-bool UiDocumentIO::Load(UiDocument& document, const std::string& path)
+bool LoadDocument(UiDocument& document, const std::string& path)
 {
-    document.Clear();
-
     std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in) {
         Debug::Logger::Error("UI", "cui load: cannot open '%s'", path.c_str());
         return false;
     }
-    const std::streamsize size = in.tellg();
-    if (size <= 0) {
-        Debug::Logger::Error("UI", "cui load: empty or unreadable '%s'", path.c_str());
+    const std::streamsize streamSize = in.tellg();
+    if (streamSize < static_cast<std::streamsize>(kHeaderBytes)
+        || streamSize > static_cast<std::streamsize>(UiDocumentIO::kMaxFileBytes)) {
+        Debug::Logger::Error("UI", "cui load: invalid file size for '%s'", path.c_str());
         return false;
     }
+    const auto size = static_cast<std::size_t>(streamSize);
     in.seekg(0);
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (!in.read(reinterpret_cast<char*>(bytes.data()), size)) {
+    std::vector<std::uint8_t> bytes(size);
+    if (!in.read(reinterpret_cast<char*>(bytes.data()), streamSize)) {
         Debug::Logger::Error("UI", "cui load: read error on '%s'", path.c_str());
         return false;
     }
@@ -166,12 +264,18 @@ bool UiDocumentIO::Load(UiDocument& document, const std::string& path)
                              version, path.c_str(), kVersion);
         return false;
     }
+
     const std::uint32_t count = r.GetU32();
-    if (!r.Ok()) {
-        Debug::Logger::Error("UI", "cui load: truncated header in '%s'", path.c_str());
+    if (!r.Ok() || count > UiDocumentIO::kMaxWidgetCount
+        || static_cast<std::size_t>(count) > r.Remaining() / kWidgetFixedBytes) {
+        Debug::Logger::Error("UI", "cui load: invalid widget count in '%s'", path.c_str());
         return false;
     }
-    document.widgets.reserve(count);
+
+    UiDocument loaded;
+    loaded.widgets.reserve(count);
+    std::unordered_set<std::uint32_t> buttonIds;
+    buttonIds.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
         Widget widget;
         widget.kind = static_cast<WidgetKind>(r.GetU8());
@@ -185,15 +289,47 @@ bool UiDocumentIO::Load(UiDocument& document, const std::string& path)
         widget.vAlign = static_cast<Align>(r.GetU8());
         widget.fontScale = r.GetF32();
         widget.text = r.GetStr();
-        if (!r.Ok()) {
-            Debug::Logger::Error("UI", "cui load: truncated widget %u in '%s'", i, path.c_str());
-            document.Clear();
+        if (!r.Ok() || !ValidateWidget(widget, buttonIds)) {
+            Debug::Logger::Error("UI", "cui load: invalid widget %u in '%s'", i,
+                                 path.c_str());
             return false;
         }
-        document.widgets.push_back(std::move(widget));
+        loaded.widgets.push_back(std::move(widget));
     }
+    if (r.Remaining() != 0u) {
+        Debug::Logger::Error("UI", "cui load: trailing data in '%s'", path.c_str());
+        return false;
+    }
+
+    document = std::move(loaded);
     Debug::Logger::Info("UI", "loaded '%s' (%u widgets)", path.c_str(), count);
     return true;
+}
+
+} // namespace
+
+bool UiDocumentIO::Save(const UiDocument& document, const std::string& path)
+{
+    try {
+        return SaveDocument(document, path);
+    } catch (const std::bad_alloc&) {
+        Debug::Logger::Error("UI", "cui save: allocation failed for '%s'", path.c_str());
+    } catch (const std::length_error&) {
+        Debug::Logger::Error("UI", "cui save: allocation size rejected for '%s'", path.c_str());
+    }
+    return false;
+}
+
+bool UiDocumentIO::Load(UiDocument& document, const std::string& path)
+{
+    try {
+        return LoadDocument(document, path);
+    } catch (const std::bad_alloc&) {
+        Debug::Logger::Error("UI", "cui load: allocation failed for '%s'", path.c_str());
+    } catch (const std::length_error&) {
+        Debug::Logger::Error("UI", "cui load: allocation size rejected for '%s'", path.c_str());
+    }
+    return false;
 }
 
 } // namespace Concord::UI

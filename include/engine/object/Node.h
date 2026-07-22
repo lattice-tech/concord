@@ -8,6 +8,7 @@
 #include "engine/render/frame/CameraView.h"
 #include "engine/render/frame/RenderInstance.h"
 #include "engine/render/frame/RenderLight.h"
+#include "engine/render/frame/RenderParticleEmitter.h"
 #include "engine/render/frame/RenderSmokeVolume.h"
 #include "math/Quaternion.h"
 #include "math/Vector3.h"
@@ -179,6 +180,9 @@ private:
 
     /** Appends this node's draw(s) for the frame (renderable nodes only). */
     virtual void CollectRender(std::vector<RenderInstance>& out) const { (void)out; }
+
+    /** Appends this node's GPU particle command, when it owns one. */
+    virtual void CollectParticleEmitters(std::vector<RenderParticleEmitter>& out) const { (void)out; }
 
     /** Appends this node's light(s) for the frame (light nodes only). */
     virtual void CollectLights(std::vector<RenderLight>& out) const { (void)out; }

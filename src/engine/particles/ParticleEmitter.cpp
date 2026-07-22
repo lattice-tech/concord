@@ -1,12 +1,17 @@
 #include "engine/particles/ParticleEmitter.h"
 
+#include "engine/debug/Logger.h"
+#include "engine/particles/ParticleSimulationRuntime.h"
 #include "engine/render/material/RenderMaterial.h"
 
 #include <bx/math.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <utility>
 
 namespace Concord::Particles {
 
@@ -14,6 +19,16 @@ namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kDegToRad = kPi / 180.0f;
+
+std::uintptr_t NextGpuEmitterKey() noexcept
+{
+    static std::atomic<std::uintptr_t> next{1};
+    std::uintptr_t key = next.fetch_add(1, std::memory_order_relaxed);
+    while (key == 0) {
+        key = next.fetch_add(1, std::memory_order_relaxed);
+    }
+    return key;
+}
 
 /** Cheap xorshift32; deterministic per-emitter without pulling <random>. */
 std::uint32_t Xor32(std::uint32_t& state) noexcept
@@ -220,10 +235,45 @@ Vector3 ForceFieldAccel(const ParticleForceField& f, const Vector3& pos) noexcep
 
 ParticleEmitter::ParticleEmitter(ParticleEmitterDesc desc)
     : m_desc(std::move(desc))
-    , m_pool(m_desc.capacity)
+    , m_renderDesc(m_desc)
     // A zero seed would make xorshift32 stall at 0 forever; coerce to 1.
     , m_rngState(m_desc.seed ? m_desc.seed : 1u)
+    , m_gpuEmitterKey(NextGpuEmitterKey())
 {
+    if (m_desc.simulationBackend != ParticleSimulationBackend::Cpu
+        && m_desc.simulationBackend != ParticleSimulationBackend::Gpu) {
+        m_desc.simulationBackend = ParticleSimulationBackend::Cpu;
+    }
+    if (m_desc.simulationBackend == ParticleSimulationBackend::Gpu
+        && !m_desc.billboard) {
+        Debug::Logger::Warn(
+            "Particles",
+            "GPU simulation currently requires billboard rendering; using CPU simulation");
+        m_desc.simulationBackend = ParticleSimulationBackend::Cpu;
+    }
+    if (m_desc.simulationBackend == ParticleSimulationBackend::Gpu
+        && m_desc.capacity > kMaxGpuParticleCapacity) {
+        Debug::Logger::Warn(
+            "Particles", "GPU particle capacity %u exceeds the %u limit; clamping",
+            m_desc.capacity, kMaxGpuParticleCapacity);
+        m_desc.capacity = kMaxGpuParticleCapacity;
+    }
+    m_renderDesc = m_desc;
+    m_activeBackend = m_desc.simulationBackend;
+    ResolveSimulationBackend();
+    if (m_activeBackend == ParticleSimulationBackend::Cpu) {
+        m_pool.resize(m_desc.capacity);
+    }
+    m_renderDesc.bursts.clear();
+    m_renderDesc.bursts.shrink_to_fit();
+    if (m_desc.simulationBackend == ParticleSimulationBackend::Gpu
+        && m_renderDesc.forceFields.size() > kMaxRenderParticleForceFields) {
+        Debug::Logger::Warn(
+            "Particles", "GPU particle emitter has %zu force fields; using the first %u",
+            m_renderDesc.forceFields.size(), kMaxRenderParticleForceFields);
+        m_renderDesc.forceFields.resize(kMaxRenderParticleForceFields);
+        m_renderDesc.forceFields.shrink_to_fit();
+    }
     SetLocalTransform(m_desc.transform);
     // Per-emitter tick: Node dispatches Advance every frame while the scene is
     // active. Advance also handles the initial prewarm on first tick.
@@ -232,17 +282,37 @@ ParticleEmitter::ParticleEmitter(ParticleEmitterDesc desc)
 
 void ParticleEmitter::Restart()
 {
+    ResolveSimulationBackend();
     m_elapsed = 0.0f;
     m_emissionAccumulator = 0.0f;
     m_rngState = m_desc.seed ? m_desc.seed : 1u;
-    for (Particle& p : m_pool) {
-        p.alive = false;
+    if (m_activeBackend == ParticleSimulationBackend::Gpu) {
+        ++m_gpuResetGeneration;
+        if (m_gpuResetGeneration == 0) {
+            m_gpuResetGeneration = 1;
+        }
+        m_gpuSpawnBudget.clear();
+        m_gpuSpawnSequence = 0;
+        m_gpuSimulationTime = 0.0;
+        m_gpuFrameSpawnCount = 0;
+        m_gpuDeltaTime = 0.0f;
+        m_gpuPrewarmSeconds = 0.0f;
+    } else {
+        for (Particle& p : m_pool) {
+            p.alive = false;
+        }
     }
     m_alive = 0;
 }
 
 void ParticleEmitter::Burst(std::uint32_t count)
 {
+    ResolveSimulationBackend();
+    if (m_activeBackend == ParticleSimulationBackend::Gpu) {
+        QueueGpuSpawns(count);
+        return;
+    }
+
     const float* w = WorldMatrix();
     for (std::uint32_t i = 0; i < count && m_alive < m_desc.capacity; ++i) {
         SpawnOne(w);
@@ -251,6 +321,12 @@ void ParticleEmitter::Burst(std::uint32_t count)
 
 void ParticleEmitter::Advance(float deltaTime)
 {
+    ResolveSimulationBackend();
+    if (m_activeBackend == ParticleSimulationBackend::Gpu) {
+        AdvanceGpu(deltaTime);
+        return;
+    }
+
     if (deltaTime <= 0.0f || m_pool.empty()) {
         return;
     }
@@ -264,25 +340,7 @@ void ParticleEmitter::Advance(float deltaTime)
         }
     }
 
-    // Track the emitter's own world-space velocity so SpawnOne can inject it
-    // into new particles (`inheritEmitterVelocity`). The first observed frame
-    // only seeds the previous position; later ticks derive speed from the delta.
-    {
-        const float* w = WorldMatrix();
-        const Vector3 curPos{w[12], w[13], w[14]};
-        if (m_emitterPosInit && deltaTime > 0.0f) {
-            const float inv = 1.0f / deltaTime;
-            m_emitterSpeed = Vector3{
-                (curPos.x - m_lastEmitterPos.x) * inv,
-                (curPos.y - m_lastEmitterPos.y) * inv,
-                (curPos.z - m_lastEmitterPos.z) * inv,
-            };
-        } else {
-            m_emitterSpeed = Vector3{};
-            m_emitterPosInit = true;
-        }
-        m_lastEmitterPos = curPos;
-    }
+    UpdateEmitterVelocity(deltaTime);
 
     const float prevElapsed = m_elapsed;
     Step(deltaTime, /*allowBursts=*/true);
@@ -381,7 +439,7 @@ void ParticleEmitter::Integrate(float dt)
             }
         }
 
-        // Analytic 3D curl noise (UE Niagara / Godot noise-module style).
+        // Analytic divergence-free curl field for turbulence.
         // The vector field F = (sin(ay+cz), sin(bz+ax), sin(cx+by)) is
         // divergence-free, so its curl gives a swirling velocity field that
         // neither piles particles up nor pushes them out — the look real
@@ -526,6 +584,10 @@ void ParticleEmitter::FireDueBursts(float previousElapsed, float currentElapsed,
 
 void ParticleEmitter::CollectRender(std::vector<RenderInstance>& out) const
 {
+    if (m_activeBackend == ParticleSimulationBackend::Gpu) {
+        return;
+    }
+
     if (m_alive == 0) {
         return;
     }
@@ -593,6 +655,175 @@ void ParticleEmitter::CollectRender(std::vector<RenderInstance>& out) const
         instance.shape = m_desc.billboard ? Object::PrimitiveShape::Quad : m_desc.primitiveShape;
         instance.effect = m_desc.billboard ? RenderEffect::ParticleBillboard : RenderEffect::Mesh;
         out.push_back(instance);
+    }
+}
+
+void ParticleEmitter::CollectParticleEmitters(std::vector<RenderParticleEmitter>& out) const
+{
+    if (m_activeBackend != ParticleSimulationBackend::Gpu
+        || m_desc.capacity == 0) {
+        return;
+    }
+
+    RenderParticleEmitter emitter;
+    emitter.emitterKey = m_gpuEmitterKey;
+    emitter.emitterId = Id();
+    emitter.resetGeneration = m_gpuResetGeneration;
+    emitter.spawnSequence = m_gpuSpawnSequence;
+    emitter.spawnCount = m_gpuFrameSpawnCount;
+    emitter.simulationTime = m_gpuSimulationTime;
+    emitter.deltaTime = m_gpuDeltaTime;
+    emitter.prewarmSeconds = m_gpuPrewarmSeconds;
+    std::memcpy(emitter.world, WorldMatrix(), sizeof(emitter.world));
+    emitter.emitterVelocity = m_emitterSpeed;
+    emitter.descriptor = m_renderDesc;
+    out.push_back(std::move(emitter));
+}
+
+void ParticleEmitter::UpdateEmitterVelocity(float deltaTime)
+{
+    const float* world = WorldMatrix();
+    const Vector3 current{world[12], world[13], world[14]};
+    if (m_emitterPosInit && deltaTime > 0.0f) {
+        const float inverseDelta = 1.0f / deltaTime;
+        m_emitterSpeed = Vector3{
+            (current.x - m_lastEmitterPos.x) * inverseDelta,
+            (current.y - m_lastEmitterPos.y) * inverseDelta,
+            (current.z - m_lastEmitterPos.z) * inverseDelta,
+        };
+    } else {
+        m_emitterSpeed = Vector3{};
+        m_emitterPosInit = true;
+    }
+    m_lastEmitterPos = current;
+}
+
+void ParticleEmitter::ResolveSimulationBackend()
+{
+    if (m_activeBackend != ParticleSimulationBackend::Gpu
+        || ParticleSimulationRuntime::GpuAvailability()
+            != GpuParticleAvailability::Unavailable) {
+        return;
+    }
+
+    Debug::Logger::Warn(
+        "Particles", "GPU particle simulation is unavailable; using CPU simulation");
+    m_activeBackend = ParticleSimulationBackend::Cpu;
+    m_pool.assign(m_desc.capacity, Particle{});
+    m_gpuSpawnBudget.clear();
+    m_gpuSpawnSequence = 0;
+    m_gpuFrameSpawnCount = 0;
+    m_gpuDeltaTime = 0.0f;
+    m_gpuPrewarmSeconds = 0.0f;
+    m_alive = 0;
+    m_elapsed = 0.0f;
+    m_emissionAccumulator = 0.0f;
+    m_rngState = m_desc.seed ? m_desc.seed : 1u;
+    m_prewarmed = false;
+}
+
+void ParticleEmitter::ExpireGpuSpawnBudget()
+{
+    while (!m_gpuSpawnBudget.empty()
+           && m_gpuSpawnBudget.front().expiresAt <= m_gpuSimulationTime) {
+        const std::uint32_t expired = m_gpuSpawnBudget.front().count;
+        m_alive = expired < m_alive ? m_alive - expired : 0;
+        m_gpuSpawnBudget.pop_front();
+    }
+}
+
+void ParticleEmitter::QueueGpuSpawns(std::uint64_t count)
+{
+    const std::uint32_t capacity = m_desc.capacity;
+    if (capacity == 0 || count == 0) {
+        return;
+    }
+
+    const std::uint32_t remaining = capacity - std::min(m_alive, capacity);
+    const std::uint32_t bounded = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(count, remaining));
+    if (bounded == 0) {
+        return;
+    }
+    const std::uint64_t frameCount = static_cast<std::uint64_t>(m_gpuFrameSpawnCount)
+        + bounded;
+    m_gpuFrameSpawnCount = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(frameCount, capacity));
+    if (std::numeric_limits<std::uint64_t>::max() - m_gpuSpawnSequence < bounded) {
+        ++m_gpuResetGeneration;
+        if (m_gpuResetGeneration == 0) {
+            m_gpuResetGeneration = 1;
+        }
+        m_gpuSpawnSequence = 0;
+        m_gpuSpawnBudget.clear();
+        m_alive = 0;
+    }
+    m_gpuSpawnSequence += bounded;
+
+    const float maximumLifetime = std::max(
+        0.05f, std::max(m_desc.lifetimeMin, m_desc.lifetimeMax));
+    m_gpuSpawnBudget.push_back({m_gpuSimulationTime + maximumLifetime, bounded});
+    m_alive = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        capacity, static_cast<std::uint64_t>(m_alive) + bounded));
+}
+
+void ParticleEmitter::AdvanceGpu(float deltaTime)
+{
+    if (deltaTime <= 0.0f || m_desc.capacity == 0) {
+        return;
+    }
+
+    m_gpuFrameSpawnCount = 0;
+    m_gpuDeltaTime = deltaTime;
+    m_gpuPrewarmSeconds = 0.0f;
+    UpdateEmitterVelocity(deltaTime);
+    m_gpuSimulationTime += static_cast<double>(deltaTime);
+    ExpireGpuSpawnBudget();
+
+    if (!m_prewarmed) {
+        m_prewarmed = true;
+        if (m_desc.prewarm && m_desc.duration > 0.0f
+            && std::isfinite(m_desc.emissionRate) && m_desc.emissionRate > 0.0f) {
+            const float maximumLifetime = std::max(
+                0.05f, std::max(m_desc.lifetimeMin, m_desc.lifetimeMax));
+            const float history = std::min(m_desc.duration, maximumLifetime);
+            const double requested = static_cast<double>(m_desc.emissionRate)
+                * static_cast<double>(history);
+            QueueGpuSpawns(static_cast<std::uint64_t>(
+                std::min<double>(requested, m_desc.capacity)));
+            m_gpuPrewarmSeconds = history;
+        }
+    }
+
+    const float previousElapsed = m_elapsed;
+    m_elapsed += deltaTime;
+    if (!m_paused) {
+        const bool emitting = m_desc.loop
+            ? (m_desc.duration > 0.0f ? m_elapsed < m_desc.duration : true)
+            : (m_desc.duration > 0.0f ? m_elapsed < m_desc.duration : false);
+        if (emitting && std::isfinite(m_desc.emissionRate) && m_desc.emissionRate > 0.0f) {
+            m_emissionAccumulator += m_desc.emissionRate * deltaTime;
+            const float whole = std::floor(m_emissionAccumulator);
+            if (whole > 0.0f) {
+                QueueGpuSpawns(static_cast<std::uint64_t>(
+                    std::min<double>(whole, m_desc.capacity)));
+                m_emissionAccumulator -= whole;
+            }
+        }
+
+        for (const ParticleBurst& burst : m_desc.bursts) {
+            if (burst.time >= previousElapsed && burst.time < m_elapsed) {
+                QueueGpuSpawns(burst.count);
+            }
+        }
+    }
+
+    if (m_emissionAccumulator > 1.0f) {
+        m_emissionAccumulator = 1.0f;
+    }
+    if (m_desc.loop && m_desc.duration > 0.0f && m_elapsed >= m_desc.duration) {
+        m_elapsed = 0.0f;
+        m_emissionAccumulator = 0.0f;
     }
 }
 

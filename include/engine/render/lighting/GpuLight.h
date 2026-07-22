@@ -10,15 +10,14 @@ namespace Concord {
 
 /**
  * GPU-facing packing of one light for the Forward+ light buffer: four `vec4`s
- * (16 floats) laid out for a storage buffer / data texture the cull compute and
- * the mesh fragment shader both read. Replaces the fixed `vec4[8]` uniform
- * arrays of the classic forward path.
+ * (16 floats) laid out as four data-texture texels read by the cull compute and
+ * mesh fragment shaders.
  *
- * Layout (matches the shader `struct GpuLight`):
+ * Texture-row layout:
  *   positionType   = (worldPos.xyz, type)          type: 0 dir, 1 point, 2 spot
  *   directionRange = (dir.xyz, range)
  *   colorIntensity = (colorLinear.rgb, intensity)
- *   spot           = (cosInner, cosOuter, sourceRadius, unused)
+ *   spot           = (cosInner, cosOuter, sourceRadius, source light index)
  * Colors are unpacked from sRGB to linear here so the shader loop needs no
  * per-light conversion.
  */
@@ -28,8 +27,12 @@ struct GpuLight {
     float colorIntensity[4]{1.0f, 1.0f, 1.0f, 1.0f};
     float spot[4]{1.0f, 0.9f, 0.4f, 0.0f};
 
-    /** Packs a resolved RenderLight into the GPU layout (sRGB → linear color). */
-    static GpuLight Pack(const RenderLight& light) noexcept
+    /**
+     * Packs a resolved light and its index in the render-view light array.
+     * The index lets clustered shading identify the directional shadow caster
+     * after the culler reorders directional lights ahead of local lights.
+     */
+    static GpuLight Pack(const RenderLight& light, std::uint32_t sourceIndex = 0) noexcept
     {
         const float kPi = 3.14159265358979323846f;
         const auto srgbToLinear = [](float c) {
@@ -51,7 +54,7 @@ struct GpuLight {
         out.spot[0] = std::cos(light.innerAngleDegrees * kPi / 180.0f);
         out.spot[1] = std::cos(light.outerAngleDegrees * kPi / 180.0f);
         out.spot[2] = light.sourceRadius;
-        out.spot[3] = 0.0f;
+        out.spot[3] = static_cast<float>(sourceIndex);
         return out;
     }
 };

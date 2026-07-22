@@ -7,11 +7,13 @@
 #include "engine/render/mesh/MeshHandle.h"
 #include "engine/render/backend/RenderBackendType.h"
 #include "engine/render/frame/RenderLight.h"
+#include "engine/render/frame/RenderParticleEmitter.h"
 #include "engine/render/frame/RenderSmokeVolume.h"
 #include "engine/render/frame/RenderEffect.h"
 #include "engine/render/frame/SkyEnvironment.h"
 #include "engine/render/material/RenderMaterial.h"
 #include "engine/window/MsaaLevel.h"
+#include "engine/window/WindowId.h"
 
 #include <cstdint>
 #include <array>
@@ -35,6 +37,9 @@ struct RenderInit {
 
 /** Everything a backend needs to add one more window as a render target. */
 struct RenderViewInit {
+    /** Public window identity used to isolate per-window overlays and input. */
+    WindowId window = kInvalidWindowId;
+
     /** Native OS window handle (HWND on Windows) to render into. */
     void* nativeWindowHandle = nullptr;
 
@@ -156,6 +161,15 @@ public:
     virtual void DestroyView(RenderViewHandle view) = 0;
 
     /**
+     * Number of completed Frame calls required before a native window passed
+     * to a destroyed view may itself be destroyed.
+     *
+     * Backends with an asynchronous render thread must cover their maximum
+     * command latency. A synchronous backend may return zero.
+     */
+    virtual std::uint32_t NativeWindowRetirementFrames() const noexcept = 0;
+
+    /**
      * Uploads `data` into GPU buffers and returns a handle naming them.
      * @return A handle to pass to SubmitMesh/DestroyMesh, or an invalid
      *         handle if the backend is not initialized or `data` is empty.
@@ -177,6 +191,20 @@ public:
      * per view per frame (one call per mesh instance).
      */
     virtual void SubmitMesh(RenderViewHandle view, const MeshDrawCommand& command) = 0;
+
+    /**
+     * Queues one GPU-simulated particle emitter for `view`.
+     *
+     * The default no-op keeps custom backends source-compatible; backends that
+     * advertise GPU particle support consume the cumulative sequence/time fields
+     * to update persistent per-emitter device state.
+     */
+    virtual void SubmitParticleEmitter(RenderViewHandle view,
+                                       const RenderParticleEmitter& emitter)
+    {
+        (void)view;
+        (void)emitter;
+    }
 
     /**
      * Draws every mesh submitted to `view` this frame, then clears the view.
@@ -208,9 +236,10 @@ public:
     /**
      * Releases every resource the backend acquired during Init(), including
      * any views that were never explicitly destroyed.
-     * Must be safe to call even if Init() was never called or failed.
+     * Must be safe to call even if Init() was never called or failed, and must
+     * not return until the backend no longer references native window handles.
      */
-    virtual void Shutdown() = 0;
+    virtual void Shutdown() noexcept = 0;
 };
 
 } // namespace Concord

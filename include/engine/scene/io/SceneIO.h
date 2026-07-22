@@ -15,7 +15,7 @@ class Node;
 }
 
 /**
- * Result of loading a `.cscene`: the spawned objects (non-owning, in file
+ * Result of loading a `.cscene`: the committed objects (non-owning, in file
  * order) so the caller can immediately drive them via the Node/Object API
  * (SetPosition, Rotate, a Mover, ...). `ok` is false on any read error.
  */
@@ -25,7 +25,7 @@ struct SceneLoadResult {
 };
 
 /**
- * Binary scene serialization (`.cscene`, CSCN version 5).
+ * Binary scene serialization (`.cscene`, CSCN version 6).
  *
  * Stores a **flat** snapshot of a Scene's objects with its local transform
  * and type-specific description. The parent/child hierarchy is intentionally

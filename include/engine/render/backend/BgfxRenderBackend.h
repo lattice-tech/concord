@@ -23,6 +23,7 @@
 #include "engine/render/backend/IRenderBackend.h"
 #include "engine/render/backend/RenderViewBlockAllocator.h"
 #include "engine/render/mesh/MeshHandle.h"
+#include "engine/render/particles/BgfxGpuParticleRenderer.h"
 #include "engine/window/MsaaLevel.h"
 #include "engine/window/SdlWindow.h"
 
@@ -30,6 +31,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -61,16 +63,19 @@ namespace Concord {
 class BgfxRenderBackend final : public IRenderBackend {
 public:
     BgfxRenderBackend();
-    ~BgfxRenderBackend() override;
+    ~BgfxRenderBackend() noexcept override;
 
     bool Prepare(const RenderInit& init) override;
     bool Init(const RenderInit& init) override;
     RenderViewHandle CreateView(const RenderViewInit& init) override;
     void DestroyView(RenderViewHandle view) override;
+    std::uint32_t NativeWindowRetirementFrames() const noexcept override;
     bool RecreateView(RenderViewHandle view, const RenderViewInit& init) override;
     MeshHandle CreateMesh(const MeshData& data) override;
     void DestroyMesh(MeshHandle mesh) override;
     void SubmitMesh(RenderViewHandle view, const MeshDrawCommand& command) override;
+    void SubmitParticleEmitter(RenderViewHandle view,
+                               const RenderParticleEmitter& emitter) override;
     void RenderView(RenderViewHandle view, const CameraView* camera,
                     const RenderLight* lights, std::uint32_t lightCount,
                     const SkyEnvironment* sky,
@@ -78,18 +83,23 @@ public:
                     std::uint32_t smokeVolumeCount = 0) override;
     void Frame() override;
     BackendFrameStats Stats() const noexcept override { return m_frameStats; }
-    void Shutdown() override;
+    void Shutdown() noexcept override;
 
 private:
-    // shadow + planar + reflection cube x6 + lightCull + scene +
+    static constexpr std::uint8_t kMaxFrameLatency = 2;
+    static constexpr std::uint32_t kNativeWindowRetirementFrames =
+        static_cast<std::uint32_t>(kMaxFrameLatency) + 2U;
+
+    // shadow + particle compute + planar + reflection cube x6 + depth prepass + lightCull + scene +
     // cloud(march+composite) + smoke(march+composite) + SMAA x3 + bloom + present
     static constexpr std::uint32_t kViewsPerWindow =
-        kShadowCascadeCount + 2 + ReflectionCapture::kFaceCount + 1
+        kShadowCascadeCount + 4 + ReflectionCapture::kFaceCount + 1
         + 2 + 2 + 3 + BgfxBloom::kMaxViews + 1;
 
     struct ViewSlot {
         /** The window's swap-chain framebuffer (from the native handle); the final present target. */
         bgfx::FrameBufferHandle framebuffer = BGFX_INVALID_HANDLE;
+        WindowId window = kInvalidWindowId;
         void* nativeWindowHandle = nullptr;
         std::uint32_t width = 0;
         std::uint32_t height = 0;
@@ -176,14 +186,24 @@ private:
          */
         RenderViewHandle planarView = kInvalidRenderView;
         PlanarReflection::Targets planar;
+        BgfxSceneUniforms::ForwardPlusContext planarForwardPlus;
         float planarViewProj[16]{};
         bool planarValid = false;
 
+        /** GPU particle simulation dispatch; runs before all views that consume particle state. */
+        RenderViewHandle particleComputeView = kInvalidRenderView;
+
+        /** Opaque depth fill shared with the main scene framebuffer. */
+        RenderViewHandle depthPrepassView = kInvalidRenderView;
+
         /** Forward+ GPU light-cull compute dispatch; runs before the scene view. */
         RenderViewHandle lightCullView = kInvalidRenderView;
+        BgfxSceneUniforms::ForwardPlusContext mainForwardPlus;
 
         /** Real-time scene cubemap sampled by reflective mesh materials. */
         std::array<RenderViewHandle, ReflectionCapture::kFaceCount> reflectionViews{};
+        std::array<BgfxSceneUniforms::ForwardPlusContext,
+                   ReflectionCapture::kFaceCount> reflectionForwardPlus{};
         ReflectionCapture::Targets reflection;
         float reflectionProbe[3]{0.0f, 0.0f, 0.0f};
         float reflectionBoxMin[3]{0.0f, 0.0f, 0.0f};
@@ -240,9 +260,20 @@ private:
                           const RenderLight* lights, std::uint32_t lightCount,
                           ShadowPassData& out);
 
+    /**
+     * Fills opaque depth and records only batches whose complete instance set
+     * reached the prepass, allowing their color pass to use an equal-depth test.
+     */
+    void RenderDepthPrepass(
+        ViewSlot& slot, std::span<const RenderBatch> batches,
+        const std::vector<const MeshDrawCommand*>& skinned,
+        std::vector<std::uint8_t>& batchResults,
+        std::vector<std::uint8_t>& skinnedResults);
+
     /** Updates all six reflection faces around the largest reflective node. */
-    void RenderReflectionCapture(ViewSlot& slot,
+    void RenderReflectionCapture(RenderViewHandle ownerView, ViewSlot& slot,
                                  const std::vector<MeshDrawCommand>& commands,
+                                 const std::vector<RenderParticleEmitter>* particles,
                                  const RenderLight* lights, std::uint32_t lightCount,
                                  const SkyEnvironment& environment,
                                  const RenderSmokeVolume* smokeVolumes = nullptr,
@@ -250,6 +281,9 @@ private:
 
     /** Frees a view's window framebuffer and its offscreen post-process target. */
     void DestroyViewTargets(ViewSlot& slot);
+
+    /** Frees camera-specific Forward+ textures retained across view resizes. */
+    void DestroyForwardPlusContexts(ViewSlot& slot);
 
     /** Resolves the offscreen scene to the window via the view's AA technique (FXAA or SMAA). */
     void RunPostProcess(RenderViewHandle view, const ViewSlot& slot, bool bloomSource,
@@ -271,6 +305,7 @@ private:
                            const RenderSmokeVolume* volumes, std::uint32_t volumeCount);
 
     bool m_prepared = false;
+    bool m_bgfxInitialized = false;
     bool m_initialized = false;
     MsaaLevel m_activeMsaa = MsaaLevel::Off;
     bool m_activeVsync = false;
@@ -278,6 +313,8 @@ private:
     SdlWindow m_deviceWindow;
     std::unordered_map<RenderViewHandle, ViewSlot> m_views;
     std::unordered_map<RenderViewHandle, std::vector<MeshDrawCommand>> m_pendingDraws;
+    std::unordered_map<RenderViewHandle,
+                       std::vector<RenderParticleEmitter>> m_pendingParticleEmitters;
     RenderViewBlockAllocator m_viewBlocks;
 
     /**
@@ -294,6 +331,8 @@ private:
     /** Reused per-view classification storage; RenderView calls are sequential. */
     std::vector<const MeshDrawCommand*> m_skinnedScratch;
     std::vector<MeshDrawCommand> m_shadowScratch;
+    std::vector<std::uint8_t> m_depthPrepassBatchScratch;
+    std::vector<std::uint8_t> m_depthPrepassSkinnedScratch;
 
     /** Per-command cubemap-face masks reused while rebuilding a reflection capture. */
     std::vector<std::uint8_t> m_reflectionVisibilityScratch;
@@ -313,8 +352,8 @@ private:
     /** Forward+ GPU compute light culler; used when the device supports compute. */
     GpuLightCuller m_gpuLightCuller;
 
-    /** When true the scene pass shades via the clustered path; false = classic 8-light. */
-    bool m_useClusteredLighting = true;
+    /** Persistent compute simulation and instanced billboard rendering. */
+    BgfxGpuParticleRenderer m_gpuParticles;
 
     /** When true (and compute is supported) culling runs on the GPU, not the CPU. */
     bool m_useGpuLightCulling = true;

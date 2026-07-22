@@ -170,16 +170,24 @@ bool EngineLoop::Impl::Enqueue(Request&& request)
     return true;
 }
 
-void EngineLoop::Impl::RejectPendingRequests()
+void EngineLoop::Impl::RejectPendingRequests() noexcept
 {
-    std::queue<Request> pending;
-    {
-        std::lock_guard<std::mutex> lock(m_queueMutex);
-        pending.swap(m_requests);
-    }
-    while (!pending.empty()) {
-        CompleteRequest(pending.front().completion, false);
-        pending.pop();
+    while (true) {
+        std::shared_ptr<RequestCompletion> completion;
+        try {
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            if (m_requests.empty()) {
+                return;
+            }
+            completion = m_requests.front().completion;
+            m_requests.pop();
+        } catch (...) {
+            return;
+        }
+        try {
+            CompleteRequest(completion, false);
+        } catch (...) {
+        }
     }
 }
 

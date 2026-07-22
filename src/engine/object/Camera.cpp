@@ -16,13 +16,49 @@ constexpr float kRadToDeg = 180.0f / kPi;
 /** Highest pitch magnitude allowed, keeping the view just shy of straight up/down. */
 constexpr float kMaxPitch = 89.0f;
 
-Vector3 Normalize(Vector3 v) noexcept
+bool IsFinite(const Vector3& value) noexcept
 {
-    const float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-    if (len <= 0.0f) {
-        return {0.0f, 0.0f, 1.0f};
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+bool TryNormalize(const Vector3& value, Vector3& out) noexcept
+{
+    if (!IsFinite(value)) {
+        return false;
     }
-    return {v.x / len, v.y / len, v.z / len};
+    const double scale = std::max({
+        std::abs(static_cast<double>(value.x)),
+        std::abs(static_cast<double>(value.y)),
+        std::abs(static_cast<double>(value.z))});
+    if (scale == 0.0) {
+        return false;
+    }
+    const double x = value.x / scale;
+    const double y = value.y / scale;
+    const double z = value.z / scale;
+    const double length = std::sqrt(x * x + y * y + z * z);
+    if (!std::isfinite(length) || length <= 0.0) {
+        return false;
+    }
+    const Vector3 normalized{
+        static_cast<float>(x / length),
+        static_cast<float>(y / length),
+        static_cast<float>(z / length),
+    };
+    if (!IsFinite(normalized)) {
+        return false;
+    }
+    out = normalized;
+    return true;
+}
+
+Vector3 Normalize(Vector3 value) noexcept
+{
+    Vector3 normalized;
+    if (TryNormalize(value, normalized)) {
+        return normalized;
+    }
+    return IsFinite(value) ? Vector3{0.0f, 0.0f, 1.0f} : value;
 }
 
 Vector3 Cross(const Vector3& a, const Vector3& b) noexcept
@@ -139,6 +175,63 @@ void Camera::MoveRight(float distance)
 void Camera::MoveUp(float distance)
 {
     Translate({m_up.x * distance, m_up.y * distance, m_up.z * distance});
+}
+
+bool Camera::ScreenPointToRay(float pixelX, float pixelY,
+                              float framebufferWidth, float framebufferHeight,
+                              Collision::Ray& outRay) const noexcept
+{
+    if (!std::isfinite(pixelX) || !std::isfinite(pixelY)
+        || !std::isfinite(framebufferWidth) || !std::isfinite(framebufferHeight)
+        || framebufferWidth <= 0.0f || framebufferHeight <= 0.0f
+        || !std::isfinite(m_nearPlane) || !std::isfinite(m_farPlane)
+        || m_nearPlane < 0.0f || m_farPlane <= m_nearPlane
+        || (m_projection != Projection::Orthographic && m_nearPlane <= 0.0f)) {
+        return false;
+    }
+
+    const float ndcX = pixelX * (2.0f / framebufferWidth) - 1.0f;
+    const float ndcY = 1.0f - pixelY * (2.0f / framebufferHeight);
+    const float aspect = framebufferWidth / framebufferHeight;
+    const Vector3 eye = WorldPosition();
+    Vector3 forward;
+    Vector3 cameraUp;
+    Vector3 right;
+    Vector3 up;
+    if (!IsFinite(eye)
+        || !TryNormalize(Forward(), forward)
+        || !TryNormalize(m_up, cameraUp)
+        || !TryNormalize(Cross(cameraUp, forward), right)
+        || !TryNormalize(Cross(forward, right), up)) {
+        return false;
+    }
+
+    Collision::Ray ray;
+    if (m_projection == Projection::Orthographic) {
+        if (!std::isfinite(m_orthoHeight) || m_orthoHeight <= 0.0f) {
+            return false;
+        }
+        const float halfHeight = m_orthoHeight * 0.5f;
+        const float halfWidth = halfHeight * aspect;
+        ray.origin = eye + forward * m_nearPlane
+            + right * (ndcX * halfWidth) + up * (ndcY * halfHeight);
+        ray.direction = forward;
+    } else {
+        if (!std::isfinite(m_fovYDegrees)
+            || m_fovYDegrees <= 0.0f || m_fovYDegrees >= 180.0f) {
+            return false;
+        }
+        const float halfHeight = std::tan(m_fovYDegrees * kDegToRad * 0.5f);
+        const float halfWidth = halfHeight * aspect;
+        ray.origin = eye;
+        ray.direction = Normalize(forward + right * (ndcX * halfWidth)
+                                  + up * (ndcY * halfHeight));
+    }
+    if (!IsFinite(ray.origin) || !IsFinite(ray.direction)) {
+        return false;
+    }
+    outRay = ray;
+    return true;
 }
 
 void Camera::AdvanceEffects(float deltaTime)

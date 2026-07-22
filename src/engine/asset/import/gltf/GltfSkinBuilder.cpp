@@ -87,7 +87,7 @@ Animation::Skeleton BuildSkeleton(const JsonValue& skin,
     jointNodes.reserve(joints->array.size());
     for (const JsonValue& j : joints->array) {
         if (j.IsNumber()) {
-            const int nodeIdx = static_cast<int>(j.number);
+            const int nodeIdx = j.IntegerOr(-1);
             const int boneIdx = static_cast<int>(jointNodes.size());
             jointNodes.push_back(nodeIdx);
             if (nodeIdx >= 0 && nodeIdx < static_cast<int>(nodeToBone.size())) {
@@ -103,7 +103,10 @@ Animation::Skeleton BuildSkeleton(const JsonValue& skin,
             children != nullptr && children->IsArray()) {
             for (const JsonValue& c : children->array) {
                 if (c.IsNumber()) {
-                    parentOf[static_cast<int>(c.number)] = n;
+                    const int child = c.IntegerOr(-1);
+                    if (child >= 0 && child < static_cast<int>(nodes.size())) {
+                        parentOf[child] = n;
+                    }
                 }
             }
         }

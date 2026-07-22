@@ -13,7 +13,8 @@ namespace Concord {
  * @brief One layer of remappable action / axis bindings.
  *
  * Pushed onto the process-wide stack with `InputActions::PushContext`. Higher
- * `priority` evaluates first; consuming an action blocks lower layers.
+ * `priority` evaluates first. Consumed physical inputs are hidden from lower
+ * layers even when those layers use a different action or axis name.
  */
 struct InputContext {
     std::string name;
@@ -21,11 +22,17 @@ struct InputContext {
     std::vector<ActionBinding> actions;
     std::vector<AxisBinding> axes;
     /**
-     * When true, any action that fires in this context is automatically
-     * consumed so lower contexts do not also see it. Per-query Consume still
-     * works when this is false.
+     * When true, triggered action and axis bindings consume their physical
+     * sources and logical names before lower contexts are evaluated. Per-query
+     * `InputActions::Consume` remains available for action results.
      */
     bool consumeOnTrigger = true;
+
+    /**
+     * Prevents every lower-priority context from observing input while this
+     * context is present. Use this for modal UI, consoles, and pause screens.
+     */
+    bool blocksLowerContexts = false;
 };
 
 } // namespace Concord

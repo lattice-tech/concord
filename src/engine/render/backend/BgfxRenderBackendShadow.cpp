@@ -11,14 +11,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <limits>
 
 namespace {
 
 namespace Detail = Concord::RenderDetail;
 using Detail::FindShadowCaster;
-using Detail::TransformAabbWorld;
-using Detail::TransformSkinnedAabbWorld;
 
 void TransformPoint(float out[3], const float matrix[16], float x, float y, float z)
 {
@@ -89,35 +86,11 @@ void BgfxRenderBackend::RenderShadowPass(RenderViewHandle view, ViewSlot& slot,
     std::copy_n(light.direction, 3, out.lightDir);
     out.casterIndex = caster;
 
-    float worldMin[3] = {
-        std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
-        std::numeric_limits<float>::max()};
-    float worldMax[3] = {
-        std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
-        std::numeric_limits<float>::lowest()};
-    for (const MeshDrawCommand& command : pendingIt->second) {
-        if (command.material.blend != Material::BlendMode::Opaque) {
-            continue;
-        }
-        const BgfxMeshStore::BgfxMesh* mesh = m_meshes.Get(command.mesh);
-        if (mesh == nullptr) {
-            continue;
-        }
-        float meshMin[3];
-        float meshMax[3];
-        if (command.bonePalette != nullptr && command.boneCount > 0 && !mesh->boneAabbs.empty()) {
-            TransformSkinnedAabbWorld(meshMin, meshMax, mesh->boneAabbs.data(),
-                                      static_cast<std::uint32_t>(mesh->boneAabbs.size()),
-                                      command.bonePalette, command.boneCount, command.worldMatrix);
-        } else {
-            TransformAabbWorld(meshMin, meshMax, mesh->aabbMin, mesh->aabbMax, command.worldMatrix);
-        }
-        for (int axis = 0; axis < 3; ++axis) {
-            worldMin[axis] = std::min(worldMin[axis], meshMin[axis]);
-            worldMax[axis] = std::max(worldMax[axis], meshMax[axis]);
-        }
-    }
-    if (worldMin[0] >= worldMax[0] && worldMin[1] >= worldMax[1] && worldMin[2] >= worldMax[2]) {
+    const bool hasOpaqueCaster = std::any_of(
+        pendingIt->second.begin(), pendingIt->second.end(), [](const MeshDrawCommand& command) {
+            return command.material.blend == Material::BlendMode::Opaque;
+        });
+    if (!hasOpaqueCaster) {
         TouchCascades();
         return;
     }
@@ -160,7 +133,8 @@ void BgfxRenderBackend::RenderShadowPass(RenderViewHandle view, ViewSlot& slot,
         float receiverCorners[8][3];
         BuildCascadeCorners(receiverCorners, inverseView, projection, fovYDegrees,
                             orthoHeight, aspect, cascadeNear, out.splitDepths[cascade]);
-        ComputeCascadeShadowFrustum(light.direction, receiverCorners, worldMin, worldMax,
+        ComputeCascadeShadowFrustum(light.direction, receiverCorners,
+                                    m_shadowConfig.casterExtrusionWorld,
                                     m_shadowConfig.resolution,
                                     samplingGuardTexels,
                                     bgfx::getCaps()->homogeneousDepth, frusta[cascade]);
@@ -196,6 +170,7 @@ void BgfxRenderBackend::RenderShadowPass(RenderViewHandle view, ViewSlot& slot,
         const RenderViewHandle shadowView = slot.shadowViews[cascade];
         m_shadowMap.BeginDepthPass(shadowView, slot.shadowFbs[cascade], m_shadowConfig,
                                    frusta[cascade].viewMatrix, frusta[cascade].projMatrix);
+        bool submitted = false;
         for (const RenderBatch& batch : m_batcher.Batches()) {
             const BgfxMeshStore::BgfxMesh* mesh = m_meshes.Get(batch.mesh);
             if (mesh == nullptr) {
@@ -222,6 +197,7 @@ void BgfxRenderBackend::RenderShadowPass(RenderViewHandle view, ViewSlot& slot,
             bgfx::setTransform(identity);
             bgfx::setInstanceDataBuffer(&idb);
             bgfx::submit(shadowView, m_shadowMap.Program());
+            submitted = true;
         }
         for (const MeshDrawCommand* command : m_skinnedScratch) {
             const BgfxMeshStore::BgfxMesh* mesh = m_meshes.Get(command->mesh);
@@ -241,8 +217,9 @@ void BgfxRenderBackend::RenderShadowPass(RenderViewHandle view, ViewSlot& slot,
             bgfx::setTransform(identity);
             bgfx::setInstanceDataBuffer(&idb);
             bgfx::submit(shadowView, m_shadowMap.SkinnedProgram());
+            submitted = true;
         }
-        if (m_batcher.Batches().empty() && m_skinnedScratch.empty()) {
+        if (!submitted) {
             bgfx::touch(shadowView);
         }
     }

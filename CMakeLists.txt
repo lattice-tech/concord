@@ -76,6 +76,15 @@ target_link_libraries(bgfx INTERFACE gdi32 user32 uuid)
 #        缩短该模块每次增量编译的时间, 见 AGENTS.md "编译速度" 相关约定
 define_property(GLOBAL PROPERTY CONCORD_MODULES BRIEF_DOCS "已启用的引擎模块" FULL_DOCS "已启用的引擎模块")
 
+function(concord_set_runtime_output target outputDir)
+    set_target_properties(${target} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${outputDir}")
+    foreach(_cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+        set_target_properties(${target} PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY_${_cfg} "${outputDir}")
+    endforeach()
+endfunction()
+
 function(concord_add_module NAME)
     cmake_parse_arguments(ARG "" "DIR" "LINK;PCH" ${ARGN})
     file(GLOB_RECURSE _srcs CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/${ARG_DIR}/*.cpp)
@@ -86,7 +95,12 @@ function(concord_add_module NAME)
 
     add_library(${NAME} SHARED ${_srcs})
     # 输出 CEngine.dll 而非 libCEngine.dll
+    # Keep each build tree's engine DLLs private. Executable targets copy their
+    # complete, toolchain-matched runtime set into their own output directory.
+    # This prevents a module-only or test build from replacing bin/*.dll next
+    # to an executable produced by a different MinGW installation.
     set_target_properties(${NAME} PROPERTIES PREFIX "")
+    concord_set_runtime_output(${NAME} "${CMAKE_CURRENT_BINARY_DIR}/runtime")
     # 导出宏: 见 include/Concord/CExport.h
     string(TOUPPER ${NAME} _upper)
     target_compile_definitions(${NAME} PRIVATE ${_upper}_EXPORTS)
@@ -106,7 +120,7 @@ find_package(Threads REQUIRED)
 # 注意: bgfx 为静态库, 只允许链入 CEngine 一个 DLL,
 # 其他模块需要渲染时通过 CEngine 暴露的接口访问, 避免多份 bgfx 全局状态
 concord_add_module(CEngine DIR engine LINK bgfx SDL3::SDL3 Threads::Threads shell32 PCH <bgfx/bgfx.h> <SDL3/SDL.h>)
-concord_add_module(CAudio  DIR audio  LINK Phonon::Phonon        PCH <phonon.h>)
+concord_add_module(CAudio  DIR audio  LINK Phonon::Phonon)
 concord_add_module(CGUI    DIR gui)
 concord_add_module(CTime   DIR time   LINK Threads::Threads)
 concord_add_module(CSystem DIR system LINK SDL3::SDL3)
@@ -120,6 +134,8 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
             ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_link_libraries(ConcordEventTypeIdentityProbe PRIVATE CEngine)
     set_target_properties(ConcordEventTypeIdentityProbe PROPERTIES PREFIX "")
+    concord_set_runtime_output(
+            ConcordEventTypeIdentityProbe "${CMAKE_CURRENT_BINARY_DIR}/tests")
 
     add_executable(ConcordEngineRegressionTests
             tests/EngineRegressionTests.cpp
@@ -128,9 +144,17 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
             tests/ObjectRenderRegressionTests.cpp
             tests/WindowInputRegressionTests.cpp
             tests/InputActionsRegressionTests.cpp
+            tests/UiRegressionTests.cpp
             tests/SceneIoGoldenTests.cpp
+            src/engine/asset/import/PlyImporter.cpp
+            src/engine/asset/import/gltf/GltfBufferReader.cpp
+            src/engine/asset/import/gltf/GltfImageResolver.cpp
+            src/engine/asset/import/ply/PlyDataReader.cpp
+            src/engine/asset/import/ply/PlyHeader.cpp
+            src/engine/asset/import/ply/PlyMeshBuilder.cpp
             src/engine/loop/UpdateDispatcher.cpp
             src/engine/render/batch/RenderBatcher.cpp
+            src/engine/render/lighting/ClusteredLightCuller.cpp
             src/engine/render/mesh/Primitives.cpp
              src/engine/render/reflection/ReflectionReceiverSelector.cpp
              src/engine/render/reflection/PlanarReflectionCamera.cpp
@@ -145,8 +169,8 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
     target_link_libraries(ConcordEngineRegressionTests PRIVATE
             CEngine bx SDL3::SDL3 Threads::Threads)
     add_dependencies(ConcordEngineRegressionTests ConcordEventTypeIdentityProbe)
-    set_target_properties(ConcordEngineRegressionTests PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/tests)
+    concord_set_runtime_output(
+            ConcordEngineRegressionTests "${CMAKE_CURRENT_BINARY_DIR}/tests")
     add_test(NAME ConcordEngineRegressionTests COMMAND ConcordEngineRegressionTests)
 
     add_executable(ConcordEnvironmentRegressionTests
@@ -157,8 +181,8 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_link_libraries(ConcordEnvironmentRegressionTests PRIVATE CEngine)
-    set_target_properties(ConcordEnvironmentRegressionTests PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/tests)
+    concord_set_runtime_output(
+            ConcordEnvironmentRegressionTests "${CMAKE_CURRENT_BINARY_DIR}/tests")
     add_test(NAME ConcordEnvironmentRegressionTests COMMAND ConcordEnvironmentRegressionTests)
 
     add_executable(ConcordSceneCollisionRegressionTests
@@ -168,8 +192,8 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
     target_include_directories(ConcordSceneCollisionRegressionTests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-    set_target_properties(ConcordSceneCollisionRegressionTests PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/tests)
+    concord_set_runtime_output(
+            ConcordSceneCollisionRegressionTests "${CMAKE_CURRENT_BINARY_DIR}/tests")
     add_test(NAME ConcordSceneCollisionRegressionTests COMMAND ConcordSceneCollisionRegressionTests)
 
     add_executable(ConcordScreenEffectRegressionTests
@@ -179,8 +203,8 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
     target_include_directories(ConcordScreenEffectRegressionTests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(ConcordScreenEffectRegressionTests PRIVATE Threads::Threads)
-    set_target_properties(ConcordScreenEffectRegressionTests PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/tests)
+    concord_set_runtime_output(
+            ConcordScreenEffectRegressionTests "${CMAKE_CURRENT_BINARY_DIR}/tests")
     add_test(NAME ConcordScreenEffectRegressionTests COMMAND ConcordScreenEffectRegressionTests)
 endif()
 

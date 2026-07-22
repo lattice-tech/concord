@@ -81,6 +81,7 @@ int main()
 |---|---|---|
 | Animation | `CAnimation.h` | Animation clips, blending, skeletons, and state machines |
 | Application | `CApplication.h` | Game lifecycle, windows, and application configuration |
+| Audio | `CAudio.h` | Steam Audio HRTF spatialization |
 | Camera | `CCamera.h` | Camera nodes and descriptors |
 | Character | `CCharacter.h` | Character controller and configuration |
 | Collision | `CCollision.h` | Collision shapes, colliders, and AABBs |
@@ -92,6 +93,7 @@ int main()
 | Environment | `CEnvironment.h` | Sky, weather, day-night, and environment settings |
 | Events | `CEvents.h` | Typed events and window input events |
 | Input | `CInput.h` | Keyboard, mouse, and input actions |
+| Interaction | `CInteraction.h` | UI-aware pointer interaction and raycast feedback |
 | Lighting | `CLight.h` | Light and sunlight nodes |
 | Materials | `CMaterial.h` | Material models, surfaces, and textures |
 | Math | `CMath.h` | Vectors, matrices, quaternions, and Euler angles |

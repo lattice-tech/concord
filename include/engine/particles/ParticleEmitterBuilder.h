@@ -8,6 +8,7 @@
 #include "engine/particles/ParticleEmitter.h"
 #include "engine/particles/ParticleEmitterDesc.h"
 #include "engine/particles/ParticleForceField.h"
+#include "engine/particles/ParticleSimulationBackend.h"
 #include "engine/scene/Scene.h"
 #include "math/Vector3.h"
 
@@ -38,11 +39,9 @@ public:
     {
     }
 
-    // ---- Placement ------------------------------------------------------
     ParticleEmitterBuilder& At(Vector3 pos) noexcept { m_desc.transform.position = pos; return *this; }
     ParticleEmitterBuilder& At(float x, float y, float z) noexcept { m_desc.transform.position = {x, y, z}; return *this; }
 
-    // ---- Emission shape -------------------------------------------------
     ParticleEmitterBuilder& Point() noexcept { m_desc.shape = EmitterShape::Point; return *this; }
     ParticleEmitterBuilder& Sphere(float radius) noexcept
     {
@@ -54,7 +53,6 @@ public:
     ParticleEmitterBuilder& Disc(float radius) noexcept { m_desc.shape = EmitterShape::Disc; m_desc.shapeSize = {radius, 0.0f, radius}; return *this; }
     ParticleEmitterBuilder& Cone(float halfAngleDegrees) noexcept { m_desc.shape = EmitterShape::Cone; m_desc.shapeAngleDegrees = halfAngleDegrees; return *this; }
 
-    // ---- Emission timing ------------------------------------------------
     ParticleEmitterBuilder& Rate(float particlesPerSecond) noexcept { m_desc.emissionRate = particlesPerSecond; return *this; }
     ParticleEmitterBuilder& Lifetime(float seconds) noexcept { m_desc.lifetimeMin = m_desc.lifetimeMax = seconds; return *this; }
     ParticleEmitterBuilder& Lifetime(float minSeconds, float maxSeconds) noexcept { m_desc.lifetimeMin = minSeconds; m_desc.lifetimeMax = maxSeconds; return *this; }
@@ -65,7 +63,6 @@ public:
     /** Schedules a one-off burst at @p seconds into the emitter's clock. */
     ParticleEmitterBuilder& Burst(float seconds, std::uint32_t count) noexcept { m_desc.bursts.push_back({seconds, count}); return *this; }
 
-    // ---- Motion ---------------------------------------------------------
     ParticleEmitterBuilder& Direction(Vector3 d) noexcept { m_desc.direction = d; return *this; }
     ParticleEmitterBuilder& Speed(float s) noexcept { m_desc.speedMin = m_desc.speedMax = s; return *this; }
     ParticleEmitterBuilder& Speed(float min, float max) noexcept { m_desc.speedMin = min; m_desc.speedMax = max; return *this; }
@@ -93,7 +90,6 @@ public:
      */
     ParticleEmitterBuilder& InheritVelocity(float fraction) noexcept { m_desc.inheritEmitterVelocity = fraction; return *this; }
 
-    // ---- Force fields & collision --------------------------------------
     ParticleEmitterBuilder& Attractor(Vector3 pos, float strength, float radius) noexcept
     {
         m_desc.forceFields.push_back({ParticleForceField::Type::Attractor, pos, strength, radius});
@@ -118,7 +114,6 @@ public:
         return *this;
     }
 
-    // ---- Appearance -----------------------------------------------------
     /** 3-key color curve (start / mid / end), packed 0xRRGGBBAA. */
     ParticleEmitterBuilder& Color(std::uint32_t start, std::uint32_t mid, std::uint32_t end) noexcept
     {
@@ -155,8 +150,23 @@ public:
     /** Total unlit brightness; 1 is the authored color and >1 drives bloom. */
     ParticleEmitterBuilder& Brightness(float multiplier) noexcept { m_desc.brightness = multiplier; return *this; }
 
-    // ---- Simulation -----------------------------------------------------
     ParticleEmitterBuilder& LocalSpace(bool on = true) noexcept { m_desc.localSpace = on; return *this; }
+    /** Selects CPU or GPU simulation for this emitter. */
+    ParticleEmitterBuilder& Simulation(ParticleSimulationBackend backend) noexcept
+    {
+        m_desc.simulationBackend = backend;
+        return *this;
+    }
+    /** Uses exact host-side simulation and ordinary render instances. */
+    ParticleEmitterBuilder& CpuSimulation() noexcept
+    {
+        return Simulation(ParticleSimulationBackend::Cpu);
+    }
+    /** Uses render-device simulation and one emitter command per frame. */
+    ParticleEmitterBuilder& GpuSimulation() noexcept
+    {
+        return Simulation(ParticleSimulationBackend::Gpu);
+    }
     ParticleEmitterBuilder& Seed(std::uint32_t s) noexcept { m_desc.seed = s; return *this; }
 
     /**

@@ -36,6 +36,15 @@ CullMode MirroredCull(CullMode mode) noexcept
     return CullMode::None;
 }
 
+bool ParticipatesInDepthPrepass(const Concord::RenderMaterial& material,
+                                Concord::RenderEffect effect) noexcept
+{
+    return effect != Concord::RenderEffect::ParticleBillboard
+        && material.blend == Concord::Material::BlendMode::Opaque
+        && material.depthWrite
+        && material.depthTest == Concord::DepthTest::LessEqual;
+}
+
 /**
  * Projects the directional sun to normalized viewport coordinates (y-up, the
  * same space the screen effects author in) for the lens-flare pass.
@@ -84,7 +93,7 @@ bool ComputeSunScreenPos(const float viewMtx[16], const float projMtx[16],
     return ndcX > -1.3f && ndcX < 1.3f && ndcY > -1.3f && ndcY < 1.3f;
 }
 
-/** Default camera: fixed eye/look-at until a Camera API exists. */
+/** Fallback camera used when a frame does not contain a camera view. */
 constexpr bx::Vec3 kCameraEye{0.0f, 5.0f, -10.0f};
 constexpr bx::Vec3 kCameraAt{0.0f, 0.0f, 0.0f};
 constexpr bx::Vec3 kCameraUp{0.0f, 1.0f, 0.0f};
@@ -179,6 +188,15 @@ void BgfxRenderBackend::SubmitMesh(RenderViewHandle view, const MeshDrawCommand&
     m_pendingDraws[view].push_back(command);
 }
 
+void BgfxRenderBackend::SubmitParticleEmitter(
+    RenderViewHandle view, const RenderParticleEmitter& emitter)
+{
+    if (!m_initialized || view == kInvalidRenderView || emitter.emitterKey == 0) {
+        return;
+    }
+    m_pendingParticleEmitters[view].push_back(emitter);
+}
+
 void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* camera,
                                    const RenderLight* lights, std::uint32_t lightCount,
                                    const SkyEnvironment* sky,
@@ -195,6 +213,9 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     const auto pendingIt = m_pendingDraws.find(view);
     const bool hasDraws = pendingIt != m_pendingDraws.end()
         && !pendingIt->second.empty();
+    const auto particleIt = m_pendingParticleEmitters.find(view);
+    const bool hasGpuParticles = particleIt != m_pendingParticleEmitters.end()
+        && !particleIt->second.empty();
 
     // Offscreen HDR scene + present blit (dither to 8-bit). Used for every AA
     // mode when the RT came up; not limited to FXAA/SMAA.
@@ -259,7 +280,7 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     const ViewEffectState* effectsPtr = hasEffects ? &flareState : nullptr;
 
     const SkyEnvironment& environment = sky != nullptr ? *sky : kDefaultSkyEnvironment;
-    bgfx::setViewClear(view, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH,
+    bgfx::setViewClear(view, BGFX_CLEAR_COLOR,
                        SkyBackgroundRgba(environment), 1.0f, 0);
     bgfx::setViewTransform(view, viewMtx, projMtx);
     bgfx::setViewMode(view, bgfx::ViewMode::Sequential);
@@ -270,15 +291,37 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     m_skyRenderer.Draw(view, viewMtx, projMtx, cameraEye, environment,
                        lights, lightCount, false, /*drawClouds=*/false);
 
+    if (slot.depthPrepassView != kInvalidRenderView) {
+        bgfx::setViewClear(slot.depthPrepassView, BGFX_CLEAR_DEPTH, 0, 1.0f, 0);
+        bgfx::setViewTransform(slot.depthPrepassView, viewMtx, projMtx);
+        bgfx::setViewMode(slot.depthPrepassView, bgfx::ViewMode::Sequential);
+        bgfx::touch(slot.depthPrepassView);
+    }
+
+    if (hasGpuParticles) {
+        m_gpuParticles.Simulate(
+            view, slot.particleComputeView, particleIt->second);
+    }
+
     if (!hasDraws) {
         if (pendingIt != m_pendingDraws.end()) {
             pendingIt->second.clear();
+        }
+        bool particleBloomSource = false;
+        if (hasGpuParticles) {
+            m_gpuParticles.Draw(view, view, particleIt->second);
+            for (const RenderParticleEmitter& emitter : particleIt->second) {
+                particleBloomSource = particleBloomSource
+                    || emitter.descriptor.blend == Material::BlendMode::Additive
+                    || emitter.descriptor.brightness > kBloomThreshold;
+            }
+            particleIt->second.clear();
         }
         if (postProcess) {
             RenderVolumeClouds(slot, viewMtx, projMtx, cameraEye, environment, lights, lightCount);
             RenderVolumeSmoke(slot, viewMtx, projMtx, cameraEye, lights, lightCount,
                               smokeVolumes, smokeVolumeCount);
-            RunPostProcess(view, slot, false, effectsPtr);
+            RunPostProcess(view, slot, particleBloomSource, effectsPtr);
         }
         DrawPrintStringOverlay(view, slot, postProcess);
         return;
@@ -287,11 +330,6 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     // Shadow skinning shares u_bones with the scene path, so the uniform set
     // must exist before the first frame's shadow submissions.
     m_uniforms.EnsureReady();
-
-    // Default to the classic light path for the shadow + reflection-capture
-    // passes below; the main scene pass re-enables the clustered path (its
-    // cluster grid is built for this camera, not the cube faces).
-    m_uniforms.UpdateClusters(m_lightCuller, ClusterGrid{}, false);
 
     // Shadow depth pass (runs first; lower bgfx view id than the scene view).
     ShadowPassData shadow;
@@ -367,6 +405,15 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
             mirrorCam.eye[0] = invMirror[12];
             mirrorCam.eye[1] = invMirror[13];
             mirrorCam.eye[2] = invMirror[14];
+            ClusterGrid planarGrid;
+            planarGrid.nearPlane = nearPlane;
+            planarGrid.farPlane = farPlane;
+            planarGrid.screenWidth = slot.planar.width;
+            planarGrid.screenHeight = slot.planar.height;
+            m_lightCuller.Assign(
+                lights, lightCount, mirrorView, slot.planarViewProj, planarGrid);
+            const bool planarClustersReady = m_uniforms.UpdateClustersCpu(
+                slot.planarForwardPlus, m_lightCuller, planarGrid);
             m_skyRenderer.Draw(slot.planarView, mirrorView, mirrorProj, mirrorCam.eye,
                                environment, lights, lightCount, false);
             constexpr std::uint16_t kInstanceStride = sizeof(float) * 16;
@@ -399,6 +446,11 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
                     || (skinned && !m_meshProgram.EnsureSkinnedReady())) {
                     continue;
                 }
+                if (planarClustersReady) {
+                    m_uniforms.SelectClusters(slot.planarForwardPlus);
+                } else {
+                    m_uniforms.DisableClusters();
+                }
                 m_uniforms.ApplyLighting(&mirrorCam, lights, lightCount, &environment);
                 m_uniforms.ApplyMaterial(
                     cmd.material, m_textureCache, flipShadowV,
@@ -425,52 +477,58 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
                              : skinned ? m_meshProgram.SkinnedProgram()
                                        : m_meshProgram.Program());
             }
+            if (hasGpuParticles) {
+                m_gpuParticles.Draw(
+                    view, slot.planarView, particleIt->second, clipPlane);
+            }
             slot.planarValid = true;
         }
     }
 
     // Capture the current opaque scene around the dominant reflective sphere.
     // Its six lower-id views finish before the mesh shader samples the cubemap.
-    RenderReflectionCapture(slot, pendingIt->second, lights, lightCount, environment,
+    RenderReflectionCapture(view, slot, pendingIt->second,
+                            hasGpuParticles ? &particleIt->second : nullptr,
+                            lights, lightCount, environment,
                             smokeVolumes, smokeVolumeCount);
 
-    // Forward+ clustered lighting for the main scene pass: cull this frame's
-    // lights into the froxel grid built for this camera, then upload. The
-    // classic 8-light path stays the fallback when disabled.
-    if (m_useClusteredLighting) {
-        ClusterGrid grid;
-        grid.nearPlane = nearPlane;
-        grid.farPlane = farPlane;
-        grid.screenWidth = slot.width;
-        grid.screenHeight = slot.height;
-        grid.aspect = aspect;
-        grid.tanHalfFovY = std::tan(fovYDegrees * 0.5f * (3.14159265358979323846f / 180.0f));
-        float viewProj[16];
-        bx::mtxMul(viewProj, viewMtx, projMtx);
+    ClusterGrid grid;
+    grid.nearPlane = nearPlane;
+    grid.farPlane = farPlane;
+    grid.screenWidth = slot.width;
+    grid.screenHeight = slot.height;
+    float viewProj[16];
+    bx::mtxMul(viewProj, viewMtx, projMtx);
 
-        const bool gpuReady = m_useGpuLightCulling && slot.lightCullView != kInvalidRenderView
-            && m_gpuLightCuller.Supported() && m_gpuLightCuller.EnsureReady();
-        if (gpuReady) {
-            // GPU path: pack lights on the CPU (cheap), let the compute shader
-            // do the O(lights x clusters) assignment. Falls back to the CPU
-            // culler below if EnsureReady ever fails on this device.
-            m_lightCuller.PackOnly(lights, lightCount);
-            m_uniforms.UpdateClustersGpu(m_lightCuller, grid,
-                                        m_gpuLightCuller.RangeTexture(), m_gpuLightCuller.IndexTexture());
-            // Upload the light-data texture bound during UpdateClustersGpu
-            // before dispatching, so the compute shader reads this frame's data.
-            m_gpuLightCuller.Cull(slot.lightCullView, m_uniforms.LightDataTexture(),
-                                  static_cast<std::uint32_t>(m_lightCuller.Lights().size()),
-                                  m_lightCuller.DirectionalCount(), viewMtx, viewProj, grid);
-        } else {
-            m_lightCuller.Assign(lights, lightCount, viewMtx, viewProj, grid);
-            m_uniforms.UpdateClusters(m_lightCuller, grid, true);
-            if (m_lightCuller.CappedAssignments() > 0 || m_lightCuller.Lights().size() > 256) {
-                Debug::Logger::Debug("Render",
-                    "Forward+: %zu lights (cap 256), %u cluster assignments dropped (per-cluster cap %u)",
-                    m_lightCuller.Lights().size(), m_lightCuller.CappedAssignments(),
-                    ClusterGrid::kMaxLightsPerCluster);
-            }
+    bool mainClustersReady = false;
+    const bool gpuReady = m_useGpuLightCulling
+        && slot.lightCullView != kInvalidRenderView
+        && slot.mainForwardPlus.Valid()
+        && m_gpuLightCuller.Supported()
+        && m_gpuLightCuller.EnsureReady();
+    if (gpuReady) {
+        m_lightCuller.PackOnly(lights, lightCount);
+        mainClustersReady = m_uniforms.PrepareClustersGpu(
+            slot.mainForwardPlus, m_lightCuller, grid);
+        if (mainClustersReady) {
+            m_gpuLightCuller.Cull(
+                slot.lightCullView, slot.mainForwardPlus.lightData,
+                slot.mainForwardPlus.clusterRanges, slot.mainForwardPlus.lightIndices,
+                static_cast<std::uint32_t>(m_lightCuller.Lights().size()),
+                m_lightCuller.DirectionalCount(), viewMtx, viewProj, grid);
+        }
+    }
+    if (!mainClustersReady) {
+        m_lightCuller.Assign(lights, lightCount, viewMtx, viewProj, grid);
+        mainClustersReady = m_uniforms.UpdateClustersCpu(
+            slot.mainForwardPlus, m_lightCuller, grid);
+        if (m_lightCuller.CappedAssignments() > 0
+            || lightCount > ClusterGrid::kMaxPackedLights) {
+            Debug::Logger::Debug(
+                "Render",
+                "Forward+: %u input lights (cap %u), %u cluster assignments dropped (per-cluster cap %u)",
+                lightCount, ClusterGrid::kMaxPackedLights,
+                m_lightCuller.CappedAssignments(), ClusterGrid::kMaxLightsPerCluster);
         }
     }
 
@@ -490,6 +548,13 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
             || (!command.material.lit && command.material.emissiveStrength > 0.0f)
             || command.material.emissiveStrength > kBloomThreshold;
     }
+    if (hasGpuParticles) {
+        for (const RenderParticleEmitter& emitter : particleIt->second) {
+            bloomSource = bloomSource
+                || emitter.descriptor.blend == Material::BlendMode::Additive
+                || emitter.descriptor.brightness > kBloomThreshold;
+        }
+    }
     const bool reflectionActive = anyRayTraced && slot.reflectionValid;
 
     m_skinnedScratch.clear();
@@ -504,13 +569,18 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
         }
     }
     m_batcher.Finish();
+    RenderDepthPrepass(
+        slot, m_batcher.Batches(), m_skinnedScratch,
+        m_depthPrepassBatchScratch, m_depthPrepassSkinnedScratch);
 
     // Four columns of the world matrix per instance (64 bytes, a multiple of
     // 16 as bgfx requires); matches vs_mesh's i_data0..i_data3. The material
     // rides along as per-batch uniforms rather than per-instance data.
     constexpr std::uint16_t kInstanceStride = sizeof(float) * 16;
 
-    for (const RenderBatch& batch : m_batcher.Batches()) {
+    const std::span<const RenderBatch> batches = m_batcher.Batches();
+    for (std::size_t batchIndex = 0; batchIndex < batches.size(); ++batchIndex) {
+        const RenderBatch& batch = batches[batchIndex];
         const bool particleBillboard = batch.effect == RenderEffect::ParticleBillboard;
         if ((particleBillboard && !m_meshProgram.ParticleReady())
             || (!particleBillboard && !m_meshProgram.Ready())) {
@@ -547,14 +617,22 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
         // Alpha and additive batches test against opaque depth without updating it,
         // preserving overlap between transparent surfaces.
         const bool blended = batch.material.blend != Material::BlendMode::Opaque;
-        const bool writeDepth = batch.material.depthWrite && !blended;
+        const bool prepassed = batchIndex < m_depthPrepassBatchScratch.size()
+            && m_depthPrepassBatchScratch[batchIndex] != 0;
+        const bool writeDepth = batch.material.depthWrite && !blended && !prepassed;
         const std::uint64_t state = baseState
-            | ToBgfxDepthTest(batch.material.depthTest)
+            | (prepassed ? BGFX_STATE_DEPTH_TEST_EQUAL
+                         : ToBgfxDepthTest(batch.material.depthTest))
             | (writeDepth ? BGFX_STATE_WRITE_Z : 0)
             | ToBgfxCull(batch.material.cull)
             | ToBgfxBlend(batch.material.blend);
 
         // Each batch sets its lighting, material and shadow resources before submit.
+        if (mainClustersReady) {
+            m_uniforms.SelectClusters(slot.mainForwardPlus);
+        } else {
+            m_uniforms.DisableClusters();
+        }
         m_uniforms.ApplyLighting(camera, lights, lightCount, &environment);
         {
             bgfx::TextureHandle planarTex = BGFX_INVALID_HANDLE;
@@ -606,7 +684,9 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     // instance-merged since palettes differ. The skinned program is compiled
     // lazily the first frame a skinned mesh appears.
     if (!m_skinnedScratch.empty() && m_meshProgram.EnsureSkinnedReady()) {
-        for (const MeshDrawCommand* command : m_skinnedScratch) {
+        for (std::size_t skinnedIndex = 0;
+             skinnedIndex < m_skinnedScratch.size(); ++skinnedIndex) {
+            const MeshDrawCommand* command = m_skinnedScratch[skinnedIndex];
             const BgfxMeshStore::BgfxMesh* mesh = m_meshes.Get(command->mesh);
             if (mesh == nullptr || !mesh->skinned) {
                 continue;
@@ -615,13 +695,21 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
                 continue;
             }
             const bool blended = command->material.blend != Material::BlendMode::Opaque;
-            const bool writeDepth = command->material.depthWrite && !blended;
+            const bool prepassed = skinnedIndex < m_depthPrepassSkinnedScratch.size()
+                && m_depthPrepassSkinnedScratch[skinnedIndex] != 0;
+            const bool writeDepth = command->material.depthWrite && !blended && !prepassed;
             const std::uint64_t state = baseState
-                | ToBgfxDepthTest(command->material.depthTest)
+                | (prepassed ? BGFX_STATE_DEPTH_TEST_EQUAL
+                             : ToBgfxDepthTest(command->material.depthTest))
                 | (writeDepth ? BGFX_STATE_WRITE_Z : 0)
                 | ToBgfxCull(command->material.cull)
                 | ToBgfxBlend(command->material.blend);
 
+            if (mainClustersReady) {
+                m_uniforms.SelectClusters(slot.mainForwardPlus);
+            } else {
+                m_uniforms.DisableClusters();
+            }
             m_uniforms.ApplyLighting(camera, lights, lightCount, &environment);
             {
                 bgfx::TextureHandle planarTex = BGFX_INVALID_HANDLE;
@@ -669,6 +757,10 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
         }
     }
 
+    if (hasGpuParticles) {
+        m_gpuParticles.Draw(view, view, particleIt->second);
+    }
+
     // Volumetric clouds composite into the HDR scene color, truncated by scene
     // depth, before bloom and the tone-mapped present.
     if (postProcess) {
@@ -685,6 +777,85 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     DrawPrintStringOverlay(view, slot, postProcess);
 
     pendingIt->second.clear();
+    if (hasGpuParticles) {
+        particleIt->second.clear();
+    }
+}
+
+void BgfxRenderBackend::RenderDepthPrepass(
+    ViewSlot& slot, std::span<const RenderBatch> batches,
+    const std::vector<const MeshDrawCommand*>& skinned,
+    std::vector<std::uint8_t>& batchResults,
+    std::vector<std::uint8_t>& skinnedResults)
+{
+    batchResults.assign(batches.size(), 0);
+    skinnedResults.assign(skinned.size(), 0);
+    if (slot.depthPrepassView == kInvalidRenderView
+        || !m_shadowMap.EnsureReady() || !m_meshProgram.Ready()) {
+        return;
+    }
+
+    constexpr std::uint16_t kInstanceStride = sizeof(float) * 16;
+    float identity[16];
+    bx::mtxIdentity(identity);
+
+    for (std::size_t batchIndex = 0; batchIndex < batches.size(); ++batchIndex) {
+        const RenderBatch& batch = batches[batchIndex];
+        if (!ParticipatesInDepthPrepass(batch.material, batch.effect)) {
+            continue;
+        }
+        const BgfxMeshStore::BgfxMesh* mesh = m_meshes.Get(batch.mesh);
+        if (mesh == nullptr) {
+            continue;
+        }
+        const std::uint32_t requested = static_cast<std::uint32_t>(batch.commands.size());
+        if (requested == 0
+            || bgfx::getAvailInstanceDataBuffer(requested, kInstanceStride) < requested) {
+            continue;
+        }
+        bgfx::InstanceDataBuffer instanceData;
+        bgfx::allocInstanceDataBuffer(&instanceData, requested, kInstanceStride);
+        std::uint8_t* cursor = instanceData.data;
+        for (std::uint32_t index = 0; index < requested; ++index) {
+            std::memcpy(cursor, batch.commands[index]->worldMatrix, kInstanceStride);
+            cursor += kInstanceStride;
+        }
+        bgfx::setState(BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LESS
+                       | ToBgfxCull(batch.material.cull));
+        bgfx::setVertexBuffer(0, mesh->vb);
+        bgfx::setIndexBuffer(mesh->ib);
+        bgfx::setTransform(identity);
+        bgfx::setInstanceDataBuffer(&instanceData);
+        bgfx::submit(slot.depthPrepassView, m_shadowMap.Program());
+        batchResults[batchIndex] = 1;
+    }
+
+    if (skinned.empty() || !m_meshProgram.EnsureSkinnedReady()) {
+        return;
+    }
+    for (std::size_t commandIndex = 0; commandIndex < skinned.size(); ++commandIndex) {
+        const MeshDrawCommand* command = skinned[commandIndex];
+        if (!ParticipatesInDepthPrepass(command->material, command->effect)) {
+            continue;
+        }
+        const BgfxMeshStore::BgfxMesh* mesh = m_meshes.Get(command->mesh);
+        if (mesh == nullptr || !mesh->skinned
+            || bgfx::getAvailInstanceDataBuffer(1, kInstanceStride) < 1) {
+            continue;
+        }
+        m_uniforms.BindBones(command->bonePalette, command->boneCount);
+        bgfx::InstanceDataBuffer instanceData;
+        bgfx::allocInstanceDataBuffer(&instanceData, 1, kInstanceStride);
+        std::memcpy(instanceData.data, command->worldMatrix, kInstanceStride);
+        bgfx::setState(BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LESS
+                       | ToBgfxCull(command->material.cull));
+        bgfx::setVertexBuffer(0, mesh->vb);
+        bgfx::setIndexBuffer(mesh->ib);
+        bgfx::setTransform(identity);
+        bgfx::setInstanceDataBuffer(&instanceData);
+        bgfx::submit(slot.depthPrepassView, m_shadowMap.SkinnedProgram());
+        skinnedResults[commandIndex] = 1;
+    }
 }
 
 void BgfxRenderBackend::RenderVolumeClouds(ViewSlot& slot, const float viewMatrix[16],
@@ -762,7 +933,7 @@ void BgfxRenderBackend::DrawPrintStringOverlay(RenderViewHandle view, const View
     std::vector<Detail::PrintStringLine> overlayLines;
     Debug::Detail::SnapshotDebugOverlay(overlayLines);
     UI::DrawList uiList;
-    UI::Detail::SnapshotDrawList(uiList);
+    UI::Detail::SnapshotDrawList(slot.window, uiList);
     if (lines.empty() && overlayLines.empty() && uiList.Empty()) {
         return;
     }

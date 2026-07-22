@@ -11,6 +11,11 @@
 
 namespace Concord {
 
+void EngineLoop::Impl::RequestSimulation()
+{
+    QueueSimulation(0.0f);
+}
+
 void EngineLoop::Impl::QueueSimulation(float deltaTime)
 {
     {

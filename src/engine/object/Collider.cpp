@@ -108,8 +108,13 @@ void Collider::SetMask(std::uint32_t mask)
 
 bool Collider::CanInteractWith(const Collider& other) const noexcept
 {
-    // Symmetric so a single overlap pair notifies both sides: interact when
-    // either collider scans a layer the other occupies.
+    std::recursive_mutex& thisMutex = GraphMutex();
+    std::recursive_mutex& otherMutex = other.GraphMutex();
+    if (&thisMutex == &otherMutex) {
+        std::lock_guard<std::recursive_mutex> lock(thisMutex);
+        return (m_mask & other.m_layer) != 0u || (other.m_mask & m_layer) != 0u;
+    }
+    std::scoped_lock lock(thisMutex, otherMutex);
     return (m_mask & other.m_layer) != 0u || (other.m_mask & m_layer) != 0u;
 }
 

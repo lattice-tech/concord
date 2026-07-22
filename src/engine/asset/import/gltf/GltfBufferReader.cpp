@@ -42,9 +42,11 @@ bool TryReadSize(const JsonValue& object,
         value = fallback;
         return true;
     }
+    const long double upperExclusive = std::ldexp(
+        1.0L, std::numeric_limits<std::size_t>::digits);
     if (!member->IsNumber() || !std::isfinite(member->number) || member->number < 0.0 ||
         std::trunc(member->number) != member->number ||
-        member->number >= static_cast<double>(std::numeric_limits<std::size_t>::max())) {
+        static_cast<long double>(member->number) >= upperExclusive) {
         return false;
     }
     value = static_cast<std::size_t>(member->number);

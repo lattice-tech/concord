@@ -4,6 +4,7 @@
 #include "Concord/CExport.h"
 #include "engine/ui/UiDocument.h"
 
+#include <cstddef>
 #include <string>
 
 namespace Concord::UI {
@@ -18,12 +19,21 @@ namespace Concord::UI {
  */
 namespace UiDocumentIO {
 
+/** Maximum encoded .cui file size accepted by Save() and Load(). */
+inline constexpr std::size_t kMaxFileBytes = 16u * 1024u * 1024u;
+
+/** Maximum number of widgets in one document. */
+inline constexpr std::size_t kMaxWidgetCount = 8192u;
+
+/** Maximum UTF-8 byte length of one widget's text payload. */
+inline constexpr std::size_t kMaxWidgetTextBytes = 4096u;
+
 /** Serializes @p document to @p path (creating parent directories). Returns success. */
 CENGINE_API bool Save(const UiDocument& document, const std::string& path);
 
 /**
  * Loads a .cui file into @p document (replacing its contents). Returns false and
- * leaves @p document empty on any I/O, magic, version or truncation error.
+ * leaves @p document unchanged on any validation, allocation, or I/O failure.
  */
 CENGINE_API bool Load(UiDocument& document, const std::string& path);
 

@@ -34,7 +34,7 @@ namespace Concord {
 namespace {
 
 constexpr std::uint32_t kMagic = 0x4E435343u; // 'CSCN' in file order
-constexpr std::uint32_t kVersion = 5;
+constexpr std::uint32_t kVersion = 6;
 constexpr std::size_t kMaxSceneFileBytes = 64u * 1024u * 1024u;
 constexpr std::uint32_t kMaxSceneNodes = 65'536u;
 constexpr std::uint32_t kMaxStringBytes = 1024u * 1024u;
@@ -545,7 +545,6 @@ void WriteParticleEmitter(Writer& w, const Particles::ParticleEmitter& e)
     w.PutF32(d.turbulenceStrength);
     w.PutF32(d.turbulenceFrequency);
 
-    // Force fields: count followed by each (type/pos/strength/radius).
     w.PutU32(static_cast<std::uint32_t>(d.forceFields.size()));
     for (const auto& f : d.forceFields) {
         w.PutU8(static_cast<std::uint8_t>(f.type));
@@ -575,9 +574,9 @@ void WriteParticleEmitter(Writer& w, const Particles::ParticleEmitter& e)
     w.PutU8(static_cast<std::uint8_t>(d.blend));
     w.PutF32(d.brightness);
     w.PutU8(d.localSpace ? 1u : 0u);
+    w.PutU8(static_cast<std::uint8_t>(d.simulationBackend));
     w.PutU32(d.seed);
 
-    // Scheduled bursts.
     w.PutU32(static_cast<std::uint32_t>(d.bursts.size()));
     for (const auto& b : d.bursts) {
         w.PutF32(b.time);
@@ -646,6 +645,14 @@ Particles::ParticleEmitterDesc ReadParticleEmitter(Reader& r)
     d.blend = static_cast<Material::BlendMode>(r.GetU8());
     d.brightness = r.GetF32();
     d.localSpace = r.GetU8() != 0;
+    const std::uint8_t simulationBackend = r.GetU8();
+    if (simulationBackend > static_cast<std::uint8_t>(
+            Particles::ParticleSimulationBackend::Gpu)) {
+        r.Fail();
+    } else {
+        d.simulationBackend = static_cast<Particles::ParticleSimulationBackend>(
+            simulationBackend);
+    }
     d.seed = r.GetU32();
 
     const std::uint32_t burstCount = r.GetU32();
@@ -668,87 +675,87 @@ Particles::ParticleEmitterDesc ReadParticleEmitter(Reader& r)
 bool SceneIO::Save(const Scene& scene, const std::string& path)
 {
     try {
-    Writer w;
-    w.PutU32(kMagic);
-    w.PutU32(kVersion);
-    WriteSkyEnvironment(w, scene.GetSkyEnvironment());
+        Writer w;
+        w.PutU32(kMagic);
+        w.PutU32(kVersion);
+        WriteSkyEnvironment(w, scene.GetSkyEnvironment());
 
-    const std::vector<Object::Node*> nodes = scene.Nodes();
-    std::uint32_t written = 0;
-    const std::size_t countPos = w.buf.size();
-    w.PutU32(0);
+        const std::vector<Object::Node*> nodes = scene.Nodes();
+        std::uint32_t written = 0;
+        const std::size_t countPos = w.buf.size();
+        w.PutU32(0);
 
-    constexpr std::size_t kInitialBytesPerNode = 384u;
-    if (nodes.size() <= (std::numeric_limits<std::size_t>::max() - 16u)
-            / kInitialBytesPerNode) {
-        w.Reserve(nodes.size() * kInitialBytesPerNode + 16u);
-    }
-
-    for (Object::Node* n : nodes) {
-        if (auto* box = dynamic_cast<Object::Box*>(n)) {
-            w.PutU8(static_cast<std::uint8_t>(NodeKind::Box));
-            WriteNodeSettings(w, *box);
-            WriteBox(w, *box);
-            ++written;
-        } else if (auto* sun = dynamic_cast<Object::SunLight*>(n)) {
-            w.PutU8(static_cast<std::uint8_t>(NodeKind::SunLight));
-            WriteNodeSettings(w, *sun);
-            WriteSunLight(w, *sun);
-            ++written;
-        } else if (auto* light = dynamic_cast<Object::Light*>(n)) {
-            w.PutU8(static_cast<std::uint8_t>(NodeKind::Light));
-            WriteNodeSettings(w, *light);
-            WriteLight(w, *light);
-            ++written;
-        } else if (auto* cam = dynamic_cast<Object::Camera*>(n)) {
-            w.PutU8(static_cast<std::uint8_t>(NodeKind::Camera));
-            WriteNodeSettings(w, *cam);
-            WriteCamera(w, *cam);
-            ++written;
-        } else if (auto* model = dynamic_cast<Object::Model*>(n)) {
-            w.PutU8(static_cast<std::uint8_t>(NodeKind::Model));
-            WriteNodeSettings(w, *model);
-            WriteModel(w, *model);
-            ++written;
-        } else if (auto* collider = dynamic_cast<Object::Collider*>(n)) {
-            w.PutU8(static_cast<std::uint8_t>(NodeKind::Collider));
-            WriteNodeSettings(w, *collider);
-            WriteCollider(w, *collider);
-            ++written;
-        } else if (auto* particles = dynamic_cast<Particles::ParticleEmitter*>(n)) {
-            w.PutU8(static_cast<std::uint8_t>(NodeKind::ParticleEmitter));
-            WriteNodeSettings(w, *particles);
-            WriteParticleEmitter(w, *particles);
-            ++written;
+        constexpr std::size_t kInitialBytesPerNode = 384u;
+        if (nodes.size() <= (std::numeric_limits<std::size_t>::max() - 16u)
+                / kInitialBytesPerNode) {
+            w.Reserve(nodes.size() * kInitialBytesPerNode + 16u);
         }
-    }
-    w.PatchU32(countPos, written);
 
-    std::error_code dirError;
-    const std::filesystem::path parent = std::filesystem::path(path).parent_path();
-    if (!parent.empty() && !std::filesystem::exists(parent, dirError)) {
-        std::filesystem::create_directories(parent, dirError);
-        if (dirError) {
-            Debug::Logger::Error("Scene", "cscene save: cannot create directory '%s' (%s)",
-                                 parent.string().c_str(), dirError.message().c_str());
+        for (Object::Node* n : nodes) {
+            if (auto* box = dynamic_cast<Object::Box*>(n)) {
+                w.PutU8(static_cast<std::uint8_t>(NodeKind::Box));
+                WriteNodeSettings(w, *box);
+                WriteBox(w, *box);
+                ++written;
+            } else if (auto* sun = dynamic_cast<Object::SunLight*>(n)) {
+                w.PutU8(static_cast<std::uint8_t>(NodeKind::SunLight));
+                WriteNodeSettings(w, *sun);
+                WriteSunLight(w, *sun);
+                ++written;
+            } else if (auto* light = dynamic_cast<Object::Light*>(n)) {
+                w.PutU8(static_cast<std::uint8_t>(NodeKind::Light));
+                WriteNodeSettings(w, *light);
+                WriteLight(w, *light);
+                ++written;
+            } else if (auto* cam = dynamic_cast<Object::Camera*>(n)) {
+                w.PutU8(static_cast<std::uint8_t>(NodeKind::Camera));
+                WriteNodeSettings(w, *cam);
+                WriteCamera(w, *cam);
+                ++written;
+            } else if (auto* model = dynamic_cast<Object::Model*>(n)) {
+                w.PutU8(static_cast<std::uint8_t>(NodeKind::Model));
+                WriteNodeSettings(w, *model);
+                WriteModel(w, *model);
+                ++written;
+            } else if (auto* collider = dynamic_cast<Object::Collider*>(n)) {
+                w.PutU8(static_cast<std::uint8_t>(NodeKind::Collider));
+                WriteNodeSettings(w, *collider);
+                WriteCollider(w, *collider);
+                ++written;
+            } else if (auto* particles = dynamic_cast<Particles::ParticleEmitter*>(n)) {
+                w.PutU8(static_cast<std::uint8_t>(NodeKind::ParticleEmitter));
+                WriteNodeSettings(w, *particles);
+                WriteParticleEmitter(w, *particles);
+                ++written;
+            }
+        }
+        w.PatchU32(countPos, written);
+
+        std::error_code dirError;
+        const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+        if (!parent.empty() && !std::filesystem::exists(parent, dirError)) {
+            std::filesystem::create_directories(parent, dirError);
+            if (dirError) {
+                Debug::Logger::Error("Scene", "cscene save: cannot create directory '%s' (%s)",
+                                     parent.string().c_str(), dirError.message().c_str());
+                return false;
+            }
+        }
+
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            Debug::Logger::Error("Scene", "cscene save: cannot open '%s' for writing", path.c_str());
             return false;
         }
-    }
-
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        Debug::Logger::Error("Scene", "cscene save: cannot open '%s' for writing", path.c_str());
-        return false;
-    }
-    out.write(reinterpret_cast<const char*>(w.buf.data()),
-              static_cast<std::streamsize>(w.buf.size()));
-    if (!out) {
-        Debug::Logger::Error("Scene", "cscene save: write error on '%s'", path.c_str());
-        return false;
-    }
-    Debug::Logger::Info("Scene", "saved '%s' (%u objects, %zu bytes)",
-                        path.c_str(), written, w.buf.size());
-    return true;
+        out.write(reinterpret_cast<const char*>(w.buf.data()),
+                  static_cast<std::streamsize>(w.buf.size()));
+        if (!out) {
+            Debug::Logger::Error("Scene", "cscene save: write error on '%s'", path.c_str());
+            return false;
+        }
+        Debug::Logger::Info("Scene", "saved '%s' (%u objects, %zu bytes)",
+                            path.c_str(), written, w.buf.size());
+        return true;
     } catch (const std::exception& exception) {
         Debug::Logger::Error("Scene", "cscene save: '%s' failed (%s)",
                              path.c_str(), exception.what());
@@ -762,113 +769,113 @@ bool SceneIO::Save(const Scene& scene, const std::string& path)
 SceneLoadResult SceneIO::Load(Scene& scene, const std::string& path)
 {
     try {
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
-    if (!in) {
-        Debug::Logger::Error("Scene", "cscene load: cannot open '%s'", path.c_str());
-        return {};
-    }
-    const std::streamsize size = in.tellg();
-    if (size <= 0) {
-        Debug::Logger::Error("Scene", "cscene load: empty or unreadable '%s'", path.c_str());
-        return {};
-    }
-    if (size > static_cast<std::streamsize>(kMaxSceneFileBytes)) {
-        Debug::Logger::Error("Scene", "cscene load: '%s' exceeds the %zu-byte limit",
-                             path.c_str(), kMaxSceneFileBytes);
-        return {};
-    }
-    in.seekg(0);
-    std::vector<std::uint8_t> data(static_cast<std::size_t>(size));
-    if (!in.read(reinterpret_cast<char*>(data.data()), size)) {
-        Debug::Logger::Error("Scene", "cscene load: read error on '%s'", path.c_str());
-        return {};
-    }
-
-    Reader r(data.data(), data.size());
-    const std::uint32_t magic = r.GetU32();
-    const std::uint32_t version = r.GetU32();
-    if (magic != kMagic) {
-        Debug::Logger::Error("Scene", "cscene load: bad magic in '%s' (0x%08x != 0x%08x)",
-                             path.c_str(), magic, kMagic);
-        return {};
-    }
-    if (version != kVersion) {
-        Debug::Logger::Error("Scene", "cscene load: version %u in '%s' (expected %u)",
-                             version, path.c_str(), kVersion);
-        return {};
-    }
-
-    const SkyEnvironment environment = ReadSkyEnvironment(r);
-    if (!r.Ok()) {
-        Debug::Logger::Error("Scene", "cscene load: truncated sky in '%s'", path.c_str());
-        return {};
-    }
-
-    const std::uint32_t count = r.GetU32();
-    if (!ValidateCount(r, count, kMaxSceneNodes, kNodePrefixBytes)) {
-        Debug::Logger::Error("Scene", "cscene load: invalid object count %u in '%s'",
-                             count, path.c_str());
-        return {};
-    }
-
-    std::vector<ParsedNode> parsedNodes;
-    parsedNodes.reserve(count);
-    std::uint32_t totalParticleCapacity = 0;
-    for (std::uint32_t i = 0; i < count && r.Ok(); ++i) {
-        const auto kind = static_cast<NodeKind>(r.GetU8());
-        ParsedNode parsed;
-        parsed.settings = ReadNodeSettings(r);
-        switch (kind) {
-            case NodeKind::Box:             parsed.descriptor = ReadBox(r); break;
-            case NodeKind::Light:           parsed.descriptor = ReadLight(r); break;
-            case NodeKind::Camera:          parsed.descriptor = ReadCamera(r); break;
-            case NodeKind::Model:           parsed.descriptor = ReadModel(r); break;
-            case NodeKind::Collider:        parsed.descriptor = ReadCollider(r); break;
-            case NodeKind::ParticleEmitter: parsed.descriptor = ReadParticleEmitter(r); break;
-            case NodeKind::SunLight:        parsed.descriptor = ReadSunLight(r); break;
-            default:
-                Debug::Logger::Error("Scene", "cscene load: unknown kind %u in '%s'",
-                                     static_cast<unsigned>(kind), path.c_str());
-                return {};
-        }
-        if (!r.Ok()) {
-            Debug::Logger::Error("Scene", "cscene load: truncated object %u in '%s'",
-                                 i, path.c_str());
+        std::ifstream in(path, std::ios::binary | std::ios::ate);
+        if (!in) {
+            Debug::Logger::Error("Scene", "cscene load: cannot open '%s'", path.c_str());
             return {};
         }
-        if (const auto* emitter = std::get_if<Particles::ParticleEmitterDesc>(
-                &parsed.descriptor)) {
-            if (emitter->capacity > kMaxTotalParticleCapacity - totalParticleCapacity) {
-                Debug::Logger::Error(
-                    "Scene", "cscene load: particle capacity budget exceeded in '%s'",
-                    path.c_str());
+        const std::streamsize size = in.tellg();
+        if (size <= 0) {
+            Debug::Logger::Error("Scene", "cscene load: empty or unreadable '%s'", path.c_str());
+            return {};
+        }
+        if (size > static_cast<std::streamsize>(kMaxSceneFileBytes)) {
+            Debug::Logger::Error("Scene", "cscene load: '%s' exceeds the %zu-byte limit",
+                                 path.c_str(), kMaxSceneFileBytes);
+            return {};
+        }
+        in.seekg(0);
+        std::vector<std::uint8_t> data(static_cast<std::size_t>(size));
+        if (!in.read(reinterpret_cast<char*>(data.data()), size)) {
+            Debug::Logger::Error("Scene", "cscene load: read error on '%s'", path.c_str());
+            return {};
+        }
+
+        Reader r(data.data(), data.size());
+        const std::uint32_t magic = r.GetU32();
+        const std::uint32_t version = r.GetU32();
+        if (magic != kMagic) {
+            Debug::Logger::Error("Scene", "cscene load: bad magic in '%s' (0x%08x != 0x%08x)",
+                                 path.c_str(), magic, kMagic);
+            return {};
+        }
+        if (version != kVersion) {
+            Debug::Logger::Error("Scene", "cscene load: version %u in '%s' (expected %u)",
+                                 version, path.c_str(), kVersion);
+            return {};
+        }
+
+        const SkyEnvironment environment = ReadSkyEnvironment(r);
+        if (!r.Ok()) {
+            Debug::Logger::Error("Scene", "cscene load: truncated sky in '%s'", path.c_str());
+            return {};
+        }
+
+        const std::uint32_t count = r.GetU32();
+        if (!ValidateCount(r, count, kMaxSceneNodes, kNodePrefixBytes)) {
+            Debug::Logger::Error("Scene", "cscene load: invalid object count %u in '%s'",
+                                 count, path.c_str());
+            return {};
+        }
+
+        std::vector<ParsedNode> parsedNodes;
+        parsedNodes.reserve(count);
+        std::uint32_t totalParticleCapacity = 0;
+        for (std::uint32_t i = 0; i < count && r.Ok(); ++i) {
+            const auto kind = static_cast<NodeKind>(r.GetU8());
+            ParsedNode parsed;
+            parsed.settings = ReadNodeSettings(r);
+            switch (kind) {
+                case NodeKind::Box:             parsed.descriptor = ReadBox(r); break;
+                case NodeKind::Light:           parsed.descriptor = ReadLight(r); break;
+                case NodeKind::Camera:          parsed.descriptor = ReadCamera(r); break;
+                case NodeKind::Model:           parsed.descriptor = ReadModel(r); break;
+                case NodeKind::Collider:        parsed.descriptor = ReadCollider(r); break;
+                case NodeKind::ParticleEmitter: parsed.descriptor = ReadParticleEmitter(r); break;
+                case NodeKind::SunLight:        parsed.descriptor = ReadSunLight(r); break;
+                default:
+                    Debug::Logger::Error("Scene", "cscene load: unknown kind %u in '%s'",
+                                         static_cast<unsigned>(kind), path.c_str());
+                    return {};
+            }
+            if (!r.Ok()) {
+                Debug::Logger::Error("Scene", "cscene load: truncated object %u in '%s'",
+                                     i, path.c_str());
                 return {};
             }
-            totalParticleCapacity += emitter->capacity;
+            if (const auto* emitter = std::get_if<Particles::ParticleEmitterDesc>(
+                    &parsed.descriptor)) {
+                if (emitter->capacity > kMaxTotalParticleCapacity - totalParticleCapacity) {
+                    Debug::Logger::Error(
+                        "Scene", "cscene load: particle capacity budget exceeded in '%s'",
+                        path.c_str());
+                    return {};
+                }
+                totalParticleCapacity += emitter->capacity;
+            }
+            parsedNodes.push_back(std::move(parsed));
         }
-        parsedNodes.push_back(std::move(parsed));
-    }
 
-    if (!r.AtEnd()) {
-        Debug::Logger::Error("Scene", "cscene load: trailing or truncated data in '%s'",
-                             path.c_str());
-        return {};
-    }
+        if (!r.AtEnd()) {
+            Debug::Logger::Error("Scene", "cscene load: trailing or truncated data in '%s'",
+                                 path.c_str());
+            return {};
+        }
 
-    SceneLoadResult result;
-    std::vector<std::unique_ptr<Object::Node>> nodes;
-    nodes.reserve(parsedNodes.size());
-    result.nodes.reserve(parsedNodes.size());
-    for (ParsedNode& parsed : parsedNodes) {
-        std::unique_ptr<Object::Node> node = CreateNode(std::move(parsed));
-        result.nodes.push_back(node.get());
-        nodes.push_back(std::move(node));
-    }
+        SceneLoadResult result;
+        std::vector<std::unique_ptr<Object::Node>> nodes;
+        nodes.reserve(parsedNodes.size());
+        result.nodes.reserve(parsedNodes.size());
+        for (ParsedNode& parsed : parsedNodes) {
+            std::unique_ptr<Object::Node> node = CreateNode(std::move(parsed));
+            result.nodes.push_back(node.get());
+            nodes.push_back(std::move(node));
+        }
 
-    scene.CommitLoadedNodes(environment, std::move(nodes));
-    result.ok = true;
-    Debug::Logger::Info("Scene", "loaded '%s' (%u objects)", path.c_str(), count);
-    return result;
+        scene.CommitLoadedNodes(environment, std::move(nodes));
+        result.ok = true;
+        Debug::Logger::Info("Scene", "loaded '%s' (%u objects)", path.c_str(), count);
+        return result;
     } catch (const std::exception& exception) {
         Debug::Logger::Error("Scene", "cscene load: '%s' failed (%s)",
                              path.c_str(), exception.what());

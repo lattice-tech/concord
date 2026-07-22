@@ -40,6 +40,22 @@ class BgfxTextureCache;
  */
 class BgfxSceneUniforms {
 public:
+    /** GPU textures and shader parameters for one camera's Forward+ light grid. */
+    struct ForwardPlusContext {
+        bgfx::TextureHandle lightData = BGFX_INVALID_HANDLE;
+        bgfx::TextureHandle clusterRanges = BGFX_INVALID_HANDLE;
+        bgfx::TextureHandle lightIndices = BGFX_INVALID_HANDLE;
+        float params[4] = {0.0f, 0.0f, 0.1f, 200.0f};
+
+        /** True when all textures required by clustered shading are available. */
+        bool Valid() const noexcept
+        {
+            return bgfx::isValid(lightData)
+                && bgfx::isValid(clusterRanges)
+                && bgfx::isValid(lightIndices);
+        }
+    };
+
     /** Creates every uniform the program reads. Idempotent. */
     void EnsureReady();
 
@@ -49,12 +65,14 @@ public:
     /** True once the uniforms are live and ready for `Apply*` calls. */
     bool Ready() const noexcept { return m_initialized; }
 
+    /** True when shared samplers, parameters, and fallback textures can drive Forward+. */
+    bool ForwardPlusReady() const noexcept { return m_forwardPlusReady; }
+
     /**
      * Packs this frame's lights into the parallel vec4 arrays the shader
-     * unpacks, plus the ambient fill (with the active light count in the
-     * w slot) and the camera eye position. Uploads the full light arrays
-     * every call (the tail past `count` is zero-filled) so no light uniform
-     * is ever left unset, even in a scene with no lights.
+     * unpacks, plus the ambient fill and camera eye position. Fixed-size light
+     * arrays are uploaded only while the classic fallback is active; clustered
+     * shading reads its camera-specific Forward+ context instead.
      */
     void ApplyLighting(const CameraView* camera, const RenderLight* lights,
                        std::uint32_t lightCount, const SkyEnvironment* sky = nullptr);
@@ -91,47 +109,44 @@ public:
      */
     void BindBones(const float* palette, std::uint32_t count);
 
-    /**
-     * Uploads the Forward+ clustered light data (packed light list, per-cluster
-     * ranges, flat index list) into the data textures `fs_mesh` samples, and
-     * sets the cluster params (mode, directional count, near, far) applied by
-     * every subsequent `ApplyMaterial`. When `enabled` is false the mode is set
-     * to classic so the shader uses the fixed 8-light uniform path (fallback),
-     * and the reflection-capture pass always runs classic.
-     */
-    void UpdateClusters(const ClusteredLightCuller& culler, const ClusterGrid& grid, bool enabled);
+    /** Allocates one camera's textures when the shared Forward+ resources are ready. */
+    bool CreateForwardPlusContext(ForwardPlusContext& context) const;
 
-    /**
-     * Uploads only the packed light-data texture from `culler.Lights()` (used
-     * ahead of the GPU compute culler, which reads that texture) and points the
-     * cluster-range/light-index samplers at the GPU-produced `rangeTex`/
-     * `indexTex` instead of the CPU-owned ones, for the rest of this frame's
-     * `ApplyMaterial` calls. Falls back to `UpdateClusters`'s CPU textures if
-     * either handle is invalid.
-     */
-    void UpdateClustersGpu(const ClusteredLightCuller& culler, const ClusterGrid& grid,
-                           bgfx::TextureHandle rangeTex, bgfx::TextureHandle indexTex);
+    /** Releases a context created by CreateForwardPlusContext. */
+    void DestroyForwardPlusContext(ForwardPlusContext& context) const;
 
-    /** The CPU-uploaded packed light-data texture the GPU compute culler reads. */
-    bgfx::TextureHandle LightDataTexture() const noexcept { return m_lightDataTex; }
+    /** Uploads a CPU-culler's packed lights, cluster ranges, and light indices. */
+    bool UpdateClustersCpu(ForwardPlusContext& context,
+                           const ClusteredLightCuller& culler,
+                           const ClusterGrid& grid) const;
+
+    /** Uploads packed lights and parameters before GPU cluster assignment. */
+    bool PrepareClustersGpu(ForwardPlusContext& context,
+                            const ClusteredLightCuller& culler,
+                            const ClusterGrid& grid) const;
+
+    /** Selects the camera-specific context bound by subsequent material draws. */
+    void SelectClusters(const ForwardPlusContext& context);
+
+    /** Selects fixed-light shading when shared resources or a camera context are unavailable. */
+    void DisableClusters();
 
 private:
-    bool m_initialized = false;
+    bool CreateForwardPlusTextures(ForwardPlusContext& context) const;
 
-    // Forward+ clustered lighting data textures + params (fs_mesh stages 9-11).
+    bool m_initialized = false;
+    bool m_forwardPlusReady = false;
+
+    // Forward+ clustered lighting resources bound at fs_mesh stages 9-11.
     bgfx::UniformHandle m_sLightData = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle m_sClusterRanges = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle m_sLightIndices = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle m_uClusterParams = BGFX_INVALID_HANDLE;
-    bgfx::TextureHandle m_lightDataTex = BGFX_INVALID_HANDLE;
-    bgfx::TextureHandle m_clusterRangeTex = BGFX_INVALID_HANDLE;
-    bgfx::TextureHandle m_lightIndexTex = BGFX_INVALID_HANDLE;
+    ForwardPlusContext m_fallbackClusters;
+    bgfx::TextureHandle m_activeLightData = BGFX_INVALID_HANDLE;
+    bgfx::TextureHandle m_activeClusterRanges = BGFX_INVALID_HANDLE;
+    bgfx::TextureHandle m_activeLightIndices = BGFX_INVALID_HANDLE;
     float m_clusterParams[4] = {0.0f, 0.0f, 0.1f, 200.0f}; // mode, dirCount, near, far
-
-    /** Range/index textures actually bound this frame: CPU-owned by default,
-     *  or the GPU compute culler's output when UpdateClustersGpu selected it. */
-    bgfx::TextureHandle m_activeRangeTex = BGFX_INVALID_HANDLE;
-    bgfx::TextureHandle m_activeIndexTex = BGFX_INVALID_HANDLE;
 
     bgfx::UniformHandle m_uAlbedo = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle m_uGradientTo = BGFX_INVALID_HANDLE;

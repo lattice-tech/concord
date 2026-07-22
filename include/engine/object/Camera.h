@@ -2,6 +2,7 @@
 #define CONCORD_CAMERA_H
 
 #include "Concord/CExport.h"
+#include "engine/collision/query/Ray.h"
 #include "engine/effects/view/ScreenEffectStack.h"
 #include "engine/object/CameraDesc.h"
 #include "engine/object/Node.h"
@@ -89,6 +90,26 @@ public:
 
     /** Raises the camera by `distance` along its up direction. */
     void MoveUp(float distance);
+
+    /**
+     * @brief Builds a world ray through a top-left-origin framebuffer point.
+     *
+     * This is a simulation-thread query over the camera's current transform and
+     * lens values; it does not read a delayed render snapshot. Perspective rays
+     * originate at the eye. Orthographic rays originate on the near plane at
+     * the selected pixel and share the camera forward direction.
+     *
+     * @param pixelX Horizontal framebuffer coordinate in pixels.
+     * @param pixelY Vertical framebuffer coordinate in pixels.
+     * @param framebufferWidth Current positive framebuffer width in pixels.
+     * @param framebufferHeight Current positive framebuffer height in pixels.
+     * @param outRay Receives a finite ray with a unit direction on success and
+     *               is unchanged on failure.
+     * @return false for invalid coordinates, dimensions, or lens state.
+     */
+    bool ScreenPointToRay(float pixelX, float pixelY,
+                          float framebufferWidth, float framebufferHeight,
+                          Collision::Ray& outRay) const noexcept;
 
     /** Returns the thread-safe controller for this camera's screen effects. */
     Concord::Effects::ScreenEffectStack& Effects() noexcept { return m_effects; }

@@ -2,6 +2,9 @@
 #define CONCORD_SCENE_H
 
 #include "Concord/CExport.h"
+#include "engine/collision/query/Ray.h"
+#include "engine/collision/query/RaycastFilter.h"
+#include "engine/collision/query/RaycastHit.h"
 #include "engine/environment/EnvironmentSettings.h"
 #include "engine/loop/EngineLoop.h"
 #include "engine/object/Node.h"
@@ -138,6 +141,34 @@ public:
     /** Removes a registered ECS system before the next graph build. */
     bool RemoveSystem(Ecs::SystemGraph::SystemId id);
 
+    /**
+     * @brief Finds the closest collider intersected by a world-space ray.
+     *
+     * The query takes the scene graph lock for its complete traversal, so the
+     * tested transforms, shapes, layers, and parent IDs belong to one coherent
+     * scene state. The returned value contains IDs and geometry only; it does
+     * not extend any scene-owned object's lifetime.
+     *
+     * @param ray World-space ray; its finite, non-zero direction is normalized
+     *            internally so hit distance is measured in world units.
+     * @param filter Layer, distance, and ignored-collider constraints.
+     * @param outHit Receives the closest hit and is unchanged when none exists.
+     * @return true when at least one collider passes the filter and intersects.
+     */
+    bool RaycastClosest(const Collision::Ray& ray,
+                        const Collision::RaycastFilter& filter,
+                        Collision::RaycastHit& outHit) const;
+
+    /**
+     * @brief Tests whether any collider intersects a filtered world-space ray.
+     *
+     * Uses the same graph-lock snapshot and shape semantics as RaycastClosest,
+     * but returns on the first accepted hit and does not construct an identity
+     * result for the caller.
+     */
+    bool RaycastAny(const Collision::Ray& ray,
+                    const Collision::RaycastFilter& filter = {}) const;
+
 private:
     friend class Game;
     friend class SceneIO;
@@ -169,6 +200,9 @@ private:
 
     void Tick(float deltaTime, std::uint64_t activationGeneration);
     std::vector<Object::Node*> SnapshotNodes() const;
+    bool RaycastInternal(const Collision::Ray& ray,
+                         const Collision::RaycastFilter& filter,
+                         Collision::RaycastHit* outClosest) const;
 
     std::shared_ptr<SceneGraphState> m_graphState;
     std::vector<std::unique_ptr<Object::Node>> m_nodes;

@@ -76,6 +76,7 @@ public:
     UpdateId OnUpdate(std::function<void(float)> callback);
     UpdateId OnSceneUpdate(std::function<void(float)> callback);
     void RemoveUpdate(UpdateId id);
+    void RequestSimulation();
 
     float DeltaTime() const noexcept;
     std::uint64_t FrameCount() const noexcept;
@@ -168,6 +169,11 @@ private:
         AntiAliasing aa = AntiAliasing::Off;
     };
 
+    struct RetiredWindow {
+        std::unique_ptr<SdlWindow> window;
+        std::uint64_t closeAfterFrame = 0;
+    };
+
     /**
      * Mesh operations submitted by threads that cannot access the backend.
      * The loop thread drains this queue.
@@ -196,8 +202,8 @@ private:
 
     void SetLoopThreadId(std::thread::id id);
     bool Enqueue(Request&& request);
-    void RejectPendingRequests();
-    void RejectMeshRequests();
+    void RejectPendingRequests() noexcept;
+    void RejectMeshRequests() noexcept;
     void Stop();
     void Wake();
     void QueueSimulation(float deltaTime);
@@ -223,6 +229,9 @@ private:
      */
     MeshHandle EnsurePrimitiveMesh(IRenderBackend& backend, Object::PrimitiveShape shape);
 
+    void RetireNativeWindow(std::unique_ptr<SdlWindow>& window,
+                            std::uint32_t retirementFrames);
+    void DrainRetiredNativeWindows(bool force);
     void CloseWindow(WindowSlot& slot, IRenderBackend& backend, bool backendReady);
 
     /**
@@ -250,6 +259,9 @@ private:
      */
     IRenderBackend* m_backendPtr = nullptr;
     bool m_backendReady = false;
+    std::uint64_t m_backendFrameGeneration = 0;
+    std::unique_ptr<SdlWindow> m_pendingWindow;
+    std::vector<RetiredWindow> m_retiredWindows;
 
     std::mutex m_queueMutex;
     std::condition_variable m_queueCv;

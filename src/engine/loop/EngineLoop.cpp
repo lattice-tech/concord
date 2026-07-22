@@ -133,18 +133,29 @@ void EngineLoop::Impl::Start(RenderBackendType type)
         return;
     }
     m_type = type;
-    m_eventGeneration.store(EventDetail::EventBusCore::Activate([this] { Wake(); }));
+    m_eventGeneration.store(EventDetail::EventBusCore::Activate([this] {
+        Wake();
+        RequestSimulation();
+    }));
     try {
         m_simulationThread = std::thread(&Impl::SimulationMain, this);
         m_thread = std::thread(&Impl::Run, this);
     } catch (...) {
-        EventDetail::EventBusCore::Shutdown(m_eventGeneration.exchange(0));
-        m_running.store(false);
+        const std::uint64_t eventGeneration = m_eventGeneration.exchange(0);
+        {
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            m_running.store(false);
+        }
+        m_queueCv.notify_all();
+        m_openCv.notify_all();
         {
             std::lock_guard<std::mutex> lock(m_simulationMutex);
             m_simulationStopping = true;
         }
         m_simulationReady.notify_all();
+        RejectPendingRequests();
+        RejectMeshRequests();
+        EventDetail::EventBusCore::Shutdown(eventGeneration);
         if (m_simulationThread.joinable()) {
             m_simulationThread.join();
         }
@@ -154,7 +165,7 @@ void EngineLoop::Impl::Start(RenderBackendType type)
 
 void EngineLoop::Impl::Stop()
 {
-    EventDetail::EventBusCore::Shutdown(m_eventGeneration.exchange(0));
+    const std::uint64_t eventGeneration = m_eventGeneration.exchange(0);
     bool wasRunning = false;
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
@@ -164,13 +175,14 @@ void EngineLoop::Impl::Stop()
         m_queueCv.notify_all();
         m_openCv.notify_all();
     }
-    RejectPendingRequests();
-    RejectMeshRequests();
     {
         std::lock_guard<std::mutex> lock(m_simulationMutex);
         m_simulationStopping = true;
     }
     m_simulationReady.notify_all();
+    RejectPendingRequests();
+    RejectMeshRequests();
+    EventDetail::EventBusCore::Shutdown(eventGeneration);
     if (m_thread.joinable()) {
         m_thread.join();
     }
@@ -238,6 +250,11 @@ EngineLoop::UpdateId EngineLoop::OnUpdate(std::function<void(float)> callback)
 EngineLoop::UpdateId EngineLoop::OnSceneUpdate(std::function<void(float)> callback)
 {
     return m_impl->OnSceneUpdate(std::move(callback));
+}
+
+void EngineLoop::RequestSimulation()
+{
+    m_impl->RequestSimulation();
 }
 
 void EngineLoop::RemoveUpdate(UpdateId id)

@@ -189,6 +189,9 @@ private:
     /** Registers scene ticking after ordinary Game update callbacks. */
     UpdateId OnSceneUpdate(std::function<void(float deltaTime)> callback);
 
+    /** Queues a coalesced simulation turn so an activated scene does not wait for a render frame. */
+    void RequestSimulation();
+
     /** Executes a CPU-only Scene task graph on the shared worker pool. */
     TaskGraphStats RunTaskGraph(TaskGraph graph);
 

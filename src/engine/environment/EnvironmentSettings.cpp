@@ -35,13 +35,6 @@ float WrapDegrees(float value) noexcept
     return value < 0.0f ? value + 360.0f : value;
 }
 
-float WrapUnit(float value) noexcept
-{
-    value = Finite(value, 0.0f);
-    value -= std::floor(value);
-    return value;
-}
-
 } // namespace
 
 EnvironmentSettings SanitizeEnvironmentSettings(EnvironmentSettings settings) noexcept
@@ -65,8 +58,7 @@ EnvironmentSettings SanitizeEnvironmentSettings(EnvironmentSettings settings) no
         settings.time.stepRemainderSeconds = 0.0;
     }
 
-    if (settings.clouds.colorMode != CloudColorMode::Physical
-        && settings.clouds.colorMode != CloudColorMode::Artistic
+    if (settings.clouds.colorMode != CloudColorMode::Lit
         && settings.clouds.colorMode != CloudColorMode::Fire) {
         settings.clouds.colorMode = defaults.clouds.colorMode;
     }
@@ -80,26 +72,13 @@ EnvironmentSettings SanitizeEnvironmentSettings(EnvironmentSettings settings) no
         NonNegative(settings.clouds.shapeScaleKm, defaults.clouds.shapeScaleKm), 0.001f);
     settings.clouds.erosion = Unit(settings.clouds.erosion, defaults.clouds.erosion);
     settings.clouds.detail = Unit(settings.clouds.detail, defaults.clouds.detail);
-    settings.clouds.anvil = Unit(settings.clouds.anvil, defaults.clouds.anvil);
-    settings.clouds.precipitation = Unit(
-        settings.clouds.precipitation, defaults.clouds.precipitation);
     settings.clouds.windDirectionDegrees = WrapDegrees(settings.clouds.windDirectionDegrees);
     settings.clouds.windSpeedKmPerSecond = NonNegative(
         settings.clouds.windSpeedKmPerSecond, defaults.clouds.windSpeedKmPerSecond);
-    settings.clouds.verticalWindKmPerSecond = Finite(
-        settings.clouds.verticalWindKmPerSecond, defaults.clouds.verticalWindKmPerSecond);
-    settings.clouds.weatherPhase = WrapUnit(settings.clouds.weatherPhase);
-    settings.clouds.weatherCyclesPerHour = NonNegative(
-        settings.clouds.weatherCyclesPerHour, defaults.clouds.weatherCyclesPerHour);
     settings.clouds.fireEmission = NonNegative(
         settings.clouds.fireEmission, defaults.clouds.fireEmission);
-    settings.clouds.phaseAnisotropy = Anisotropy(
-        settings.clouds.phaseAnisotropy, defaults.clouds.phaseAnisotropy);
     settings.clouds.silverLining = std::clamp(
         Finite(settings.clouds.silverLining, defaults.clouds.silverLining), 0.0f, 4.0f);
-    settings.clouds.primarySteps = std::clamp<std::uint16_t>(
-        settings.clouds.primarySteps, 8, 256);
-    settings.clouds.lightSteps = std::clamp<std::uint8_t>(settings.clouds.lightSteps, 1, 32);
 
     settings.heightFog.density = NonNegative(
         settings.heightFog.density, defaults.heightFog.density);

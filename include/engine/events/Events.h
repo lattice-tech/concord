@@ -11,7 +11,7 @@
 
 namespace Concord {
 
-/** @brief Process-wide typed notification API dispatched by the EngineLoop. */
+/** @brief Process-wide typed notification API dispatched by the simulation coordinator. */
 class Events {
 public:
     /**
@@ -29,11 +29,29 @@ public:
     }
 
     /**
+     * @brief Enqueues a non-blocking marker after previously accepted events.
+     *
+     * Dispatched means every earlier accepted event completed its dispatch.
+     * Publications from handlers or other threads after this call are not part
+     * of the marker. Shutdown completes an accepted pending marker as Retired.
+     */
+    static EventFence Fence()
+    {
+        return EventDetail::EventBusCore::Fence();
+    }
+
+    /** @brief Returns a thread-safe snapshot of the current or most recently retired generation. */
+    static EventBusStats Stats() noexcept
+    {
+        return EventDetail::EventBusCore::Stats();
+    }
+
+    /**
      * @brief Registers a handler for exactly event type `T`.
      *
-     * Handlers run in registration order on the EngineLoop thread. The callback
-     * receives a const reference, so one move-only payload can be observed by
-     * every matching handler without copies.
+     * Handlers run in registration order on the simulation coordinator. The
+     * callback receives a const reference, so one move-only payload can be
+     * observed by every matching handler without copies.
      */
     template <typename T, typename Handler>
         requires std::invocable<Handler&, const T&>

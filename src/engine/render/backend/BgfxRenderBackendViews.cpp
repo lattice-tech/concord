@@ -33,11 +33,15 @@ bool BgfxRenderBackend::CreateFramebufferForView(RenderViewHandle view, const Re
 
     ViewSlot slot;
     slot.framebuffer = framebuffer;
+    slot.window = init.window;
     slot.nativeWindowHandle = init.nativeWindowHandle;
     slot.width = init.width;
     slot.height = init.height;
     slot.aa = init.aa;
     if (existing != m_views.end()) {
+        if (slot.window == kInvalidWindowId) {
+            slot.window = existing->second.window;
+        }
         slot.presentView = existing->second.presentView;
         slot.smaaEdgeView = existing->second.smaaEdgeView;
         slot.smaaWeightView = existing->second.smaaWeightView;
@@ -48,8 +52,13 @@ bool BgfxRenderBackend::CreateFramebufferForView(RenderViewHandle view, const Re
         slot.shadowTextures = existing->second.shadowTextures;
         slot.shadowReady = existing->second.shadowReady;
         slot.planarView = existing->second.planarView;
+        slot.planarForwardPlus = existing->second.planarForwardPlus;
         slot.reflectionViews = existing->second.reflectionViews;
+        slot.reflectionForwardPlus = existing->second.reflectionForwardPlus;
+        slot.particleComputeView = existing->second.particleComputeView;
+        slot.depthPrepassView = existing->second.depthPrepassView;
         slot.lightCullView = existing->second.lightCullView;
+        slot.mainForwardPlus = existing->second.mainForwardPlus;
         slot.cloudView = existing->second.cloudView;
         slot.cloudCompositeView = existing->second.cloudCompositeView;
         slot.smokeView = existing->second.smokeView;
@@ -78,8 +87,11 @@ bool BgfxRenderBackend::CreateFramebufferForView(RenderViewHandle view, const Re
         if (m_postProcess.EnsureReady()
             && m_postProcess.CreateTargets(init.width, init.height, slot.scene)) {
             bgfx::setViewFrameBuffer(view, slot.scene.framebuffer);
-            bgfx::setViewClear(view, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, SkyBackgroundRgba(), 1.0f, 0);
+            bgfx::setViewClear(view, BGFX_CLEAR_COLOR, SkyBackgroundRgba(), 1.0f, 0);
             bgfx::setViewRect(view, 0, 0, w, h);
+            bgfx::setViewFrameBuffer(slot.depthPrepassView, slot.scene.framebuffer);
+            bgfx::setViewClear(slot.depthPrepassView, BGFX_CLEAR_DEPTH, 0, 1.0f, 0);
+            bgfx::setViewRect(slot.depthPrepassView, 0, 0, w, h);
 
             bgfx::setViewFrameBuffer(presentView, framebuffer);
             bgfx::setViewClear(presentView, BGFX_CLEAR_COLOR, 0x000000ff, 1.0f, 0);
@@ -143,8 +155,11 @@ bool BgfxRenderBackend::CreateFramebufferForView(RenderViewHandle view, const Re
 
     // Fallback: render straight into the window's swap-chain framebuffer.
     bgfx::setViewFrameBuffer(view, framebuffer);
-    bgfx::setViewClear(view, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, SkyBackgroundRgba(), 1.0f, 0);
+    bgfx::setViewClear(view, BGFX_CLEAR_COLOR, SkyBackgroundRgba(), 1.0f, 0);
     bgfx::setViewRect(view, 0, 0, w, h);
+    bgfx::setViewFrameBuffer(slot.depthPrepassView, framebuffer);
+    bgfx::setViewClear(slot.depthPrepassView, BGFX_CLEAR_DEPTH, 0, 1.0f, 0);
+    bgfx::setViewRect(slot.depthPrepassView, 0, 0, w, h);
     m_views[view] = slot;
     return true;
 }
@@ -181,12 +196,15 @@ RenderViewHandle BgfxRenderBackend::CreateView(const RenderViewInit& init)
     for (RenderViewHandle& shadowView : shadowViews) {
         shadowView = static_cast<RenderViewHandle>(nextView++);
     }
+    // Particle simulation must precede every view that reads its state buffer.
+    const RenderViewHandle particleComputeViewId = static_cast<RenderViewHandle>(nextView++);
     // planar (mirrored scene) → six-face reflection capture → scene
     const RenderViewHandle planarViewId = static_cast<RenderViewHandle>(nextView++);
     std::array<RenderViewHandle, ReflectionCapture::kFaceCount> reflectionViews{};
     for (RenderViewHandle& reflectionView : reflectionViews) {
         reflectionView = static_cast<RenderViewHandle>(nextView++);
     }
+    const RenderViewHandle depthPrepassViewId = static_cast<RenderViewHandle>(nextView++);
     // Forward+ GPU light-cull compute dispatch runs right before the scene view
     // so its cluster range/index textures are ready when the scene samples them.
     const RenderViewHandle lightCullViewId = static_cast<RenderViewHandle>(nextView++);
@@ -205,11 +223,27 @@ RenderViewHandle BgfxRenderBackend::CreateView(const RenderViewInit& init)
     seed.shadowViews = shadowViews;
     seed.planarView = planarViewId;
     seed.reflectionViews = reflectionViews;
+    seed.particleComputeView = particleComputeViewId;
+    seed.depthPrepassView = depthPrepassViewId;
     seed.lightCullView = lightCullViewId;
     seed.cloudView = cloudViewId;
     seed.cloudCompositeView = cloudCompositeViewId;
     seed.smokeView = smokeViewId;
     seed.smokeCompositeView = smokeCompositeViewId;
+    m_uniforms.EnsureReady();
+    bool forwardPlusReady = m_uniforms.ForwardPlusReady();
+    if (forwardPlusReady) {
+        forwardPlusReady = m_uniforms.CreateForwardPlusContext(seed.mainForwardPlus);
+        forwardPlusReady = m_uniforms.CreateForwardPlusContext(seed.planarForwardPlus)
+            && forwardPlusReady;
+        for (BgfxSceneUniforms::ForwardPlusContext& context : seed.reflectionForwardPlus) {
+            forwardPlusReady = m_uniforms.CreateForwardPlusContext(context) && forwardPlusReady;
+        }
+    }
+    if (!forwardPlusReady) {
+        Debug::Logger::Warn(
+            "Render", "Forward+ resources unavailable; affected passes use fixed lights");
+    }
     if (m_shadowMap.EnsureReady()) {
         seed.shadowReady = true;
         for (std::uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
@@ -251,6 +285,7 @@ RenderViewHandle BgfxRenderBackend::CreateView(const RenderViewInit& init)
                                               seed.shadowTextures[cascade]);
             }
         }
+        DestroyForwardPlusContexts(seed);
         m_viewBlocks.Release(firstView);
         return kInvalidRenderView;
     }
@@ -262,6 +297,8 @@ RenderViewHandle BgfxRenderBackend::CreateView(const RenderViewInit& init)
         bgfx::setViewName(seed.shadowViews[cascade], name);
     }
     bgfx::setViewName(seed.planarView, "PlanarReflection");
+    bgfx::setViewName(seed.particleComputeView, "GPU particles: simulate");
+    bgfx::setViewName(seed.depthPrepassView, "ForwardPlus/DepthPrepass");
     bgfx::setViewName(seed.lightCullView, "ForwardPlus/LightCull");
     static constexpr const char* kReflectionNames[ReflectionCapture::kFaceCount] = {
         "Reflection/+X", "Reflection/-X", "Reflection/+Y",
@@ -287,6 +324,7 @@ RenderViewHandle BgfxRenderBackend::CreateView(const RenderViewInit& init)
 
     if (!CreateFramebufferForView(view, init)) {
         DestroyViewTargets(m_views[view]);
+        DestroyForwardPlusContexts(m_views[view]);
         if (m_views[view].shadowReady) {
             for (std::uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
                 m_shadowMap.DestroyViewTarget(m_views[view].shadowFbs[cascade],
@@ -351,10 +389,13 @@ void BgfxRenderBackend::DestroyView(RenderViewHandle view)
         it->second.shadowReady = false;
     }
     DestroyViewTargets(it->second);
+    DestroyForwardPlusContexts(it->second);
+    m_gpuParticles.DestroyView(view);
     m_smaa.Release(view);
     m_viewBlocks.Release(it->second.shadowViews[0]);
     m_views.erase(it);
     m_pendingDraws.erase(view);
+    m_pendingParticleEmitters.erase(view);
 }
 
 void BgfxRenderBackend::DestroyViewTargets(ViewSlot& slot)
@@ -388,7 +429,16 @@ void BgfxRenderBackend::DestroyViewTargets(ViewSlot& slot)
     slot.reflectionInitialized = false;
     slot.reflectionFaceCursor = 0;
     slot.reflectionPendingFaces = 0;
-    // presentView / smaa*View / shadowView / planarView / reflectionViews are stable ids.
+    // Pass view ids and Forward+ contexts remain stable across target rebuilds.
+}
+
+void BgfxRenderBackend::DestroyForwardPlusContexts(ViewSlot& slot)
+{
+    m_uniforms.DestroyForwardPlusContext(slot.mainForwardPlus);
+    m_uniforms.DestroyForwardPlusContext(slot.planarForwardPlus);
+    for (BgfxSceneUniforms::ForwardPlusContext& context : slot.reflectionForwardPlus) {
+        m_uniforms.DestroyForwardPlusContext(context);
+    }
 }
 
 } // namespace Concord

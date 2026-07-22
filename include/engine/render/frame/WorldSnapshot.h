@@ -5,6 +5,7 @@
 #include "engine/environment/RenderEnvironment.h"
 #include "engine/render/frame/RenderInstance.h"
 #include "engine/render/frame/RenderLight.h"
+#include "engine/render/frame/RenderParticleEmitter.h"
 #include "engine/render/frame/RenderSmokeVolume.h"
 #include "engine/render/frame/SkyEnvironment.h"
 
@@ -24,6 +25,7 @@ struct WorldSnapshot {
     std::uint64_t generation = 0;
     std::uint64_t simulationFrame = 0;
     std::vector<RenderInstance> instances;
+    std::vector<RenderParticleEmitter> particleEmitters;
     std::vector<RenderLight> lights;
     std::vector<RenderSmokeVolume> smokeVolumes;
     std::vector<float> boneMatrices;

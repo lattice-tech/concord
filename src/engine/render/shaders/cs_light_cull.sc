@@ -14,7 +14,7 @@
 #define CLUSTER_DIM_Z 24
 #define CLUSTER_MAX_LIGHTS 64
 #define CLUSTER_INDEX_TEX_W 1024
-#define MAX_LIGHTS 256
+#define MAX_PACKED_LIGHTS 256
 
 SAMPLER2D(s_lightData, 0);
 IMAGE2D_WO(s_outRanges, rgba32f, 1);
@@ -22,9 +22,6 @@ IMAGE2D_WO(s_outIndices, r32f, 2);
 
 // x: light count, y: directional count, z: near, w: far.
 uniform vec4 u_cullParams;
-// Screen dims (xy) and tan(fovY/2), aspect (zw) — reconstructs each cluster's
-// view-space frustum slice on the fly instead of receiving a CPU-built AABB.
-uniform vec4 u_cullScreen;
 // Column-major view matrix (camera world -> view space), for light positions.
 uniform mat4 u_cullView;
 // Column-major view-projection, for screen-space light footprint.
@@ -62,10 +59,10 @@ void main()
 		return;
 	}
 
-	int lightCount = int(u_cullParams.x);
-	int dirCount = int(u_cullParams.y);
-	float nearP = u_cullParams.z;
-	float farP = u_cullParams.w;
+	int lightCount = clamp(int(u_cullParams.x), 0, MAX_PACKED_LIGHTS);
+	int dirCount = clamp(int(u_cullParams.y), 0, lightCount);
+	float nearP = max(u_cullParams.z, 1e-4);
+	float farP = max(u_cullParams.w, nearP + 1e-4);
 
 	// This cluster's screen-space tile rectangle, in [0,1] UV.
 	float u0 = float(tileX) / float(CLUSTER_DIM_X);

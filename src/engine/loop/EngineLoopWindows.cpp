@@ -2,9 +2,11 @@
 
 #include "engine/debug/Logger.h"
 #include "engine/render/mesh/Primitives.h"
+#include "engine/ui/UiSurface.h"
 
 #include <SDL3/SDL.h>
 
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -31,8 +33,11 @@ void EngineLoop::Impl::MarkWindowClosed(WindowId id)
     }
     // State publishers hold m_openMutex through their per-map write. Once the
     // membership erase above completes, no publisher can reintroduce this id.
-    std::lock_guard<std::mutex> stateLock(m_snapshotMutex);
-    m_worldSnapshots.erase(id);
+    {
+        std::lock_guard<std::mutex> stateLock(m_snapshotMutex);
+        m_worldSnapshots.erase(id);
+    }
+    UI::ClearSurface(id);
     m_openCv.notify_all();
 }
 
@@ -124,22 +129,26 @@ void EngineLoop::Impl::HandleAttach(const Request& request,
     int pixelWidth = request.width;
     int pixelHeight = request.height;
     window->PixelSize(pixelWidth, pixelHeight);
+    if (m_pendingWindow) {
+        Debug::Logger::Error("EngineLoop", "cannot attach a window while another attach is pending cleanup");
+        window->Close();
+        CompleteRequest(request.completion, false);
+        return;
+    }
+    m_pendingWindow = std::move(window);
     if (backendReady) {
         RenderViewInit viewInit;
-        viewInit.nativeWindowHandle = window->NativeHandle();
+        viewInit.window = request.id;
+        viewInit.nativeWindowHandle = m_pendingWindow->NativeHandle();
         viewInit.width = static_cast<std::uint32_t>(pixelWidth);
         viewInit.height = static_cast<std::uint32_t>(pixelHeight);
         viewInit.msaa = request.msaa;
         viewInit.aa = request.aa;
         viewInit.vsync = request.vsync;
-        try {
-            view = backend->CreateView(viewInit);
-        } catch (...) {
-            window->Close();
-            throw;
-        }
+        view = backend->CreateView(viewInit);
         if (view == kInvalidRenderView) {
-            window->Close();
+            RetireNativeWindow(m_pendingWindow, backend->NativeWindowRetirementFrames());
+            DrainRetiredNativeWindows(false);
             CompleteRequest(request.completion, false);
             return;
         }
@@ -148,26 +157,39 @@ void EngineLoop::Impl::HandleAttach(const Request& request,
     std::lock_guard<std::mutex> lock(request.completion->mutex);
     if (request.completion->cancelled || request.completion->completed) {
         if (backendReady && view != kInvalidRenderView) {
+            RetireNativeWindow(m_pendingWindow, backend->NativeWindowRetirementFrames());
             backend->DestroyView(view);
+            DrainRetiredNativeWindows(false);
+        } else {
+            m_pendingWindow->Close();
+            m_pendingWindow.reset();
         }
-        window->Close();
         return;
     }
 
-    m_eventRouter.RegisterWindow(request.id, window->Handle());
-    windows.emplace(request.id, WindowSlot{
-        std::move(window),
-        view,
-        pixelWidth,
-        pixelHeight,
-        request.width,
-        request.height,
-        request.mode,
-        request.vsync,
-        request.msaa,
-        request.aa,
-    });
-    MarkWindowOpen(request.id, windows.at(request.id).window->IsRelativeMouseMode());
+    auto [slotIt, inserted] = windows.try_emplace(request.id);
+    if (!inserted) {
+        RetireNativeWindow(m_pendingWindow, backend->NativeWindowRetirementFrames());
+        backend->DestroyView(view);
+        DrainRetiredNativeWindows(false);
+        request.completion->completed = true;
+        request.completion->result = false;
+        request.completion->done.set_value(false);
+        return;
+    }
+    WindowSlot& slot = slotIt->second;
+    slot.window = std::move(m_pendingWindow);
+    slot.view = view;
+    slot.width = pixelWidth;
+    slot.height = pixelHeight;
+    slot.requestedWidth = request.width;
+    slot.requestedHeight = request.height;
+    slot.mode = request.mode;
+    slot.vsync = request.vsync;
+    slot.msaa = request.msaa;
+    slot.aa = request.aa;
+    m_eventRouter.RegisterWindow(request.id, slot.window->Handle());
+    MarkWindowOpen(request.id, slot.window->IsRelativeMouseMode());
     request.completion->completed = true;
     request.completion->result = true;
     request.completion->done.set_value(true);
@@ -196,12 +218,50 @@ MeshHandle EngineLoop::Impl::EnsurePrimitiveMesh(IRenderBackend& backend, Object
     return mesh;
 }
 
+void EngineLoop::Impl::RetireNativeWindow(std::unique_ptr<SdlWindow>& window,
+                                          std::uint32_t retirementFrames)
+{
+    if (!window) {
+        return;
+    }
+    m_retiredWindows.emplace_back();
+    RetiredWindow& retired = m_retiredWindows.back();
+    const std::uint64_t remaining = std::numeric_limits<std::uint64_t>::max()
+        - m_backendFrameGeneration;
+    retired.closeAfterFrame = retirementFrames > remaining
+        ? std::numeric_limits<std::uint64_t>::max()
+        : m_backendFrameGeneration + retirementFrames;
+    retired.window = std::move(window);
+    retired.window->SetRelativeMouseMode(false);
+    retired.window->SetVisible(false);
+}
+
+void EngineLoop::Impl::DrainRetiredNativeWindows(bool force)
+{
+    for (auto it = m_retiredWindows.begin(); it != m_retiredWindows.end();) {
+        if (!force && m_backendFrameGeneration < it->closeAfterFrame) {
+            ++it;
+            continue;
+        }
+        if (it->window) {
+            it->window->Close();
+        }
+        it = m_retiredWindows.erase(it);
+    }
+}
+
 void EngineLoop::Impl::CloseWindow(WindowSlot& slot, IRenderBackend& backend, bool backendReady)
 {
-    if (slot.view != kInvalidRenderView) {
+    if (backendReady && slot.view != kInvalidRenderView) {
+        RetireNativeWindow(slot.window, backend.NativeWindowRetirementFrames());
         backend.DestroyView(slot.view);
+        slot.view = kInvalidRenderView;
+        DrainRetiredNativeWindows(false);
+        return;
     }
-    slot.window->Close();
+    if (slot.window) {
+        slot.window->Close();
+    }
 }
 
 bool EngineLoop::Impl::HandleUpdate(const Request& request,
@@ -244,6 +304,7 @@ bool EngineLoop::Impl::HandleUpdate(const Request& request,
 
     if (backendReady && slot.view != kInvalidRenderView && (sizeChanged || msaaChanged || aaChanged || vsyncChanged)) {
         RenderViewInit viewInit;
+        viewInit.window = request.id;
         viewInit.nativeWindowHandle = slot.window->NativeHandle();
         viewInit.width = static_cast<std::uint32_t>(pixelWidth);
         viewInit.height = static_cast<std::uint32_t>(pixelHeight);

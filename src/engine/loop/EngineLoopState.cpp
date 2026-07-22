@@ -236,21 +236,28 @@ void EngineLoop::Impl::DestroyMesh(MeshHandle mesh)
     future.wait_for(kRequestTimeout);
 }
 
-void EngineLoop::Impl::RejectMeshRequests()
+void EngineLoop::Impl::RejectMeshRequests() noexcept
 {
-    std::queue<MeshRequest> pending;
-    {
-        std::lock_guard<std::mutex> lock(m_meshMutex);
-        pending.swap(m_meshRequests);
-    }
-    while (!pending.empty()) {
-        const std::shared_ptr<MeshRequest::Completion> completion = pending.front().completion;
-        pending.pop();
-        std::lock_guard<std::mutex> lock(completion->mutex);
-        if (!completion->completed) {
-            completion->cancelled = true;
-            completion->completed = true;
-            completion->done.set_value(MeshHandle::Invalid());
+    while (true) {
+        std::shared_ptr<MeshRequest::Completion> completion;
+        try {
+            std::lock_guard<std::mutex> lock(m_meshMutex);
+            if (m_meshRequests.empty()) {
+                return;
+            }
+            completion = m_meshRequests.front().completion;
+            m_meshRequests.pop();
+        } catch (...) {
+            return;
+        }
+        try {
+            std::lock_guard<std::mutex> lock(completion->mutex);
+            if (!completion->completed) {
+                completion->cancelled = true;
+                completion->completed = true;
+                completion->done.set_value(MeshHandle::Invalid());
+            }
+        } catch (...) {
         }
     }
 }
