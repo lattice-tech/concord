@@ -290,6 +290,7 @@ void Scene::Tick(float deltaTime, std::uint64_t activationGeneration)
         float collectEmittersMs = 0.0f;
         float collectLightsMs = 0.0f;
         float collectSmokeMs = 0.0f;
+        float collectWaterMs = 0.0f;
         for (Object::ObjectHandle handle : handles) {
             std::lock_guard<std::recursive_mutex> lock(state->mutex);
             Object::Node* node = ResolveLiveLocked(handle);
@@ -312,14 +313,20 @@ void Scene::Tick(float deltaTime, std::uint64_t activationGeneration)
             node->CollectSmokeVolumes(snapshot.smokeVolumes);
             collectSmokeMs += std::chrono::duration<float, std::milli>(
                 Clock::now() - section).count();
+            section = Clock::now();
+            node->CollectWaterSurfaces(snapshot.waterSurfaces);
+            node->CollectFluids(snapshot.fluids);
+            collectWaterMs += std::chrono::duration<float, std::milli>(
+                Clock::now() - section).count();
         }
         if (collectRenderMs > 100.0f || collectEmittersMs > 100.0f
-            || collectLightsMs > 100.0f || collectSmokeMs > 100.0f) {
+            || collectLightsMs > 100.0f || collectSmokeMs > 100.0f
+            || collectWaterMs > 100.0f) {
             Debug::Logger::Warn(
                 "Scene",
-                "Extraction breakdown render=%.2f emitters=%.2f lights=%.2f smoke=%.2f ms",
+                "Extraction breakdown render=%.2f emitters=%.2f lights=%.2f smoke=%.2f water=%.2f ms",
                 collectRenderMs, collectEmittersMs, collectLightsMs,
-                collectSmokeMs);
+                collectSmokeMs, collectWaterMs);
         }
         snapshot.visibilityAuthored = static_cast<std::uint32_t>(authored.size());
 

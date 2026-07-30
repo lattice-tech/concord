@@ -268,6 +268,12 @@ void EngineLoop::Impl::Run()
                 for (const RenderParticleEmitter& emitter : snapshot->particleEmitters) {
                     backend->SubmitParticleEmitter(slot.view, emitter);
                 }
+                for (const RenderWaterSurface& surface : snapshot->waterSurfaces) {
+                    backend->SubmitWaterSurface(slot.view, surface);
+                }
+                for (const RenderFluid& fluid : snapshot->fluids) {
+                    backend->SubmitFluid(slot.view, fluid);
+                }
                 backend->RenderView(slot.view, snapshot->hasCamera ? &snapshot->camera : nullptr,
                                     snapshot->lights.data(),
                                     static_cast<std::uint32_t>(snapshot->lights.size()),

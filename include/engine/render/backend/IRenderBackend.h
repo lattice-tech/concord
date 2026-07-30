@@ -6,9 +6,11 @@
 #include "engine/render/mesh/MeshData.h"
 #include "engine/render/mesh/MeshHandle.h"
 #include "engine/render/backend/RenderBackendType.h"
+#include "engine/render/frame/RenderFluid.h"
 #include "engine/render/frame/RenderLight.h"
 #include "engine/render/frame/RenderParticleEmitter.h"
 #include "engine/render/frame/RenderSmokeVolume.h"
+#include "engine/render/frame/RenderWaterSurface.h"
 #include "engine/render/frame/RenderEffect.h"
 #include "engine/render/frame/SkyEnvironment.h"
 #include "engine/render/material/RenderMaterial.h"
@@ -222,6 +224,33 @@ public:
     {
         (void)view;
         (void)emitter;
+    }
+
+    /**
+     * Queues one resolved water surface for `view`'s water pass this frame.
+     *
+     * The default no-op keeps custom backends source-compatible; backends with
+     * a water pass draw up to kMaxRenderWaterSurfaces of them after the opaque
+     * scene resolve.
+     */
+    virtual void SubmitWaterSurface(RenderViewHandle view,
+                                    const RenderWaterSurface& surface)
+    {
+        (void)view;
+        (void)surface;
+    }
+
+    /**
+     * Queues one DFSPH fluid body for `view` this frame.
+     *
+     * The default no-op keeps custom backends source-compatible; backends with
+     * compute support simulate and reconstruct up to kMaxRenderFluids, keyed by
+     * `fluid.fluidKey` for persistent GPU state across frames.
+     */
+    virtual void SubmitFluid(RenderViewHandle view, const RenderFluid& fluid)
+    {
+        (void)view;
+        (void)fluid;
     }
 
     /**

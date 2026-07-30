@@ -7,6 +7,7 @@
 #include "engine/render/batch/RenderBatcher.h"
 #include "engine/render/debug/DebugTextOverlay.h"
 #include "engine/render/environment/BgfxSkyRenderer.h"
+#include "engine/render/fluid/BgfxFluidRenderer.h"
 #include "engine/render/postprocess/AntiAliasing.h"
 #include "engine/render/postprocess/BgfxBloom.h"
 #include "engine/render/postprocess/BgfxPostProcess.h"
@@ -20,6 +21,7 @@
 #include "engine/render/ui/UiRenderer.h"
 #include "engine/render/volume/BgfxSmokeRenderer.h"
 #include "engine/render/volume/BgfxVolumeCloudRenderer.h"
+#include "engine/render/water/BgfxWaterRenderer.h"
 #include "engine/render/backend/IRenderBackend.h"
 #include "engine/render/backend/RenderViewBlockAllocator.h"
 #include "engine/render/mesh/MeshHandle.h"
@@ -77,6 +79,9 @@ public:
     void SubmitShadowCaster(RenderViewHandle view, const MeshDrawCommand& command) override;
     void SubmitParticleEmitter(RenderViewHandle view,
                                const RenderParticleEmitter& emitter) override;
+    void SubmitWaterSurface(RenderViewHandle view,
+                            const RenderWaterSurface& surface) override;
+    void SubmitFluid(RenderViewHandle view, const RenderFluid& fluid) override;
     void RenderView(RenderViewHandle view, const CameraView* camera,
                     const RenderLight* lights, std::uint32_t lightCount,
                     const SkyEnvironment* sky,
@@ -91,11 +96,13 @@ private:
     static constexpr std::uint32_t kNativeWindowRetirementFrames =
         static_cast<std::uint32_t>(kMaxFrameLatency) + 2U;
 
-    // shadow + particle compute + planar + reflection cube x6 + depth prepass + lightCull + scene +
-    // cloud(march+composite) + smoke(march+composite) + SMAA x3 + bloom + present
+    // waterBake + shadow cascades + particle compute + fluid compute + planar
+    // + depth prepass + lightCull + reflection cube x6 + scene + water +
+    // fluid surface + cloud(march+composite) + smoke(march+composite) +
+    // SMAA x3 + bloom + present
     static constexpr std::uint32_t kViewsPerWindow = 1 +
         kShadowCascadeCount + 4 + ReflectionCapture::kFaceCount + 1
-        + 2 + 2 + 3 + BgfxBloom::kMaxViews + 1
+        + 2 + 2 + 2 + 3 + BgfxBloom::kMaxViews + 1
         + 1;
 
     struct ViewSlot {
@@ -127,11 +134,30 @@ private:
         RenderViewHandle cloudCompositeView = kInvalidRenderView;
 
         /**
-         * Water surfaces draw into the HDR scene target through this view,
+         * Water surfaces draw into the HDR scene target through `waterView`,
          * ordered after the scene view (so they composite onto resolved opaque
          * geometry) and before the cloud/smoke passes (so their depth still
-         * occludes those). It owns no target of its own.
+         * occludes those). It owns no target of its own. `waterBakeView` is
+         * the first view of the whole window block: the wave cascade bakes
+         * before shadows, the planar reflection and the scene so all of them
+         * agree on the shape of the water this frame. The DFSPH fluid pipeline
+         * mirrors that split: `fluidComputeView` simulates and reconstructs
+         * before the scene, `fluidSurfaceView` draws right after the water.
          */
+        RenderViewHandle waterView = kInvalidRenderView;
+        RenderViewHandle waterBakeView = kInvalidRenderView;
+        RenderViewHandle fluidComputeView = kInvalidRenderView;
+        RenderViewHandle fluidSurfaceView = kInvalidRenderView;
+
+        /**
+         * Blit copies of the resolved opaque scene color/depth, snapshotted at
+         * the start of the water view so the water and fluid passes can sample
+         * what they refract without reading the target they draw into.
+         * Recreated with the window on resize.
+         */
+        bgfx::TextureHandle sceneColorCopy = BGFX_INVALID_HANDLE;
+        bgfx::TextureHandle sceneDepthCopy = BGFX_INVALID_HANDLE;
+
         bgfx::TextureHandle cloudColor = BGFX_INVALID_HANDLE;
         bgfx::FrameBufferHandle cloudFb = BGFX_INVALID_HANDLE;
         std::uint32_t cloudWidth = 0;
@@ -322,6 +348,15 @@ private:
                            const RenderLight* lights, std::uint32_t lightCount,
                            const RenderSmokeVolume* volumes, std::uint32_t volumeCount);
 
+    /** Draws this frame's water surfaces into the HDR scene target. */
+    void RenderWater(ViewSlot& slot, const float viewMatrix[16],
+                     const float projectionMatrix[16], const float eye[3],
+                     float nearPlane, float farPlane,
+                     const SkyEnvironment& environment,
+                     const RenderLight* lights, std::uint32_t lightCount,
+                     const RenderWaterSurface* surfaces,
+                     std::uint32_t surfaceCount);
+
     bool m_prepared = false;
     bool m_bgfxInitialized = false;
     bool m_initialized = false;
@@ -339,6 +374,9 @@ private:
     std::unordered_map<RenderViewHandle, std::vector<MeshDrawCommand>> m_pendingShadowCasters;
     std::unordered_map<RenderViewHandle,
                        std::vector<RenderParticleEmitter>> m_pendingParticleEmitters;
+    std::unordered_map<RenderViewHandle,
+                       std::vector<RenderWaterSurface>> m_pendingWaterSurfaces;
+    std::unordered_map<RenderViewHandle, std::vector<RenderFluid>> m_pendingFluids;
     RenderViewBlockAllocator m_viewBlocks;
 
     /**
@@ -401,6 +439,12 @@ private:
 
     /** Local volumetric smoke pass, composited into the HDR scene RT. */
     BgfxSmokeRenderer m_volumeSmoke;
+
+    /** Water surface pass: cascade bake + displaced grid draw into the scene RT. */
+    BgfxWaterRenderer m_water;
+
+    /** GPU DFSPH fluid pipeline: simulate, reconstruct, refract. */
+    BgfxFluidRenderer m_fluid;
 
     /** Single directional-light shadow depth pass program, target and uniforms. */
     ShadowMap m_shadowMap;

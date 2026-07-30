@@ -33,6 +33,14 @@ float DistanceSquared(const Vector3& lhs, const Vector3& rhs) noexcept
     return dx * dx + dy * dy + dz * dz;
 }
 
+std::uint64_t VoiceKey(const AudioVoiceHandle& handle) noexcept
+{
+    return (static_cast<std::uint64_t>(handle.Generation()) << 32u)
+        | handle.Slot();
+}
+
+constexpr std::uint32_t kNoSpatialSlot = 0xFFFFFFFFu;
+
 } // namespace
 
 bool AudioMixer::Init(const AudioRuntimeConfig& config)
@@ -75,6 +83,8 @@ void AudioMixer::Shutdown() noexcept
     m_uiScratch.clear();
     m_dialogueScratch.clear();
     m_activeVoices.clear();
+    m_spatialAssignments.clear();
+    m_spatialSlotUsed.clear();
     m_config = {};
     m_initialized = false;
 }
@@ -115,7 +125,26 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
                          }
                          return lhs.params.priority > rhs.params.priority;
                      });
-    std::uint32_t spatialIndex = 0;
+    // Release spatializers whose voice is gone, keep the rest pinned to the
+    // same slot, and mark occupancy so new voices only take genuinely free ones.
+    m_spatialSlotUsed.assign(m_spatializers.size(), false);
+    for (auto it = m_spatialAssignments.begin(); it != m_spatialAssignments.end();) {
+        bool alive = false;
+        for (const ActiveVoiceView& voice : m_activeVoices) {
+            if (voice.params.spatial && VoiceKey(voice.handle) == it->first) {
+                alive = true;
+                break;
+            }
+        }
+        if (!alive) {
+            it = m_spatialAssignments.erase(it);
+            continue;
+        }
+        if (it->second < m_spatialSlotUsed.size()) {
+            m_spatialSlotUsed[it->second] = true;
+        }
+        ++it;
+    }
     float peak = 0.0f;
     for (const ActiveVoiceView& voice : m_activeVoices) {
         const AudioClipDesc* desc = clips.Describe(voice.clip);
@@ -123,15 +152,22 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
         if (desc == nullptr || samples == nullptr || desc->frameCount == 0) {
             continue;
         }
+        // The clip cursor advances at the same pitched rate the render loop
+        // samples at; advancing by the block size regardless of pitch made
+        // every block restart mid-ramp (a periodic discontinuity heard as
+        // buzzing on any pitched or doppler-shifted voice).
+        const float pitch = EffectivePitch(voice, listener);
+        const std::uint32_t advanceFrames = std::max<std::uint32_t>(
+            1u, static_cast<std::uint32_t>(static_cast<float>(frames) * pitch + 0.5f));
         if (buses.BusMuted(voice.params.bus) || buses.BusGain(voice.params.bus) <= 0.0f) {
-            voices.Advance(voice.handle, frames, desc->frameCount);
+            voices.Advance(voice.handle, advanceFrames, desc->frameCount);
             continue;
         }
 
         const float gain = voice.params.gain * buses.BusGain(AudioBusId::Master)
             * buses.BusGain(voice.params.bus);
         if (gain <= 0.0f) {
-            voices.Advance(voice.handle, frames, desc->frameCount);
+            voices.Advance(voice.handle, advanceFrames, desc->frameCount);
             continue;
         }
 
@@ -156,7 +192,6 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
 
         if (desc->channels == 1) {
             std::fill(m_monoScratch.begin(), m_monoScratch.end(), 0.0f);
-            const float pitch = EffectivePitch(voice, listener);
             for (std::uint32_t frame = 0; frame < frames; ++frame) {
                 const std::uint64_t sampleFrame = voice.cursorFrame
                     + static_cast<std::uint64_t>(static_cast<float>(frame) * pitch);
@@ -168,7 +203,7 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
                     : static_cast<std::uint32_t>(sampleFrame);
                 m_monoScratch[frame] = samples[clipFrame];
             }
-            if (voice.params.spatial && spatialIndex < m_spatializers.size()) {
+            if (voice.params.spatial) {
                 SpatialAudioListener spatialListener{};
                 spatialListener.position = listener.position;
                 spatialListener.right = listener.right;
@@ -178,11 +213,39 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
                 spatialSource.position = voice.params.source.position;
                 spatialSource.gain = voice.params.source.gain * DistanceGain(voice.params.source, listener);
                 spatialSource.spatialBlend = voice.params.spatialBlend;
-                if (m_spatializers[spatialIndex].Process(m_monoScratch, m_stereoScratch,
-                                                         spatialListener, spatialSource)) {
-                    AccumulateStereo(m_stereoScratch.data(), frames, gain, busBuffer);
+                std::uint32_t slot = kNoSpatialSlot;
+                const std::uint64_t key = VoiceKey(voice.handle);
+                if (const auto found = m_spatialAssignments.find(key);
+                    found != m_spatialAssignments.end()) {
+                    slot = found->second;
+                } else {
+                    for (std::uint32_t index = 0; index < m_spatialSlotUsed.size(); ++index) {
+                        if (!m_spatialSlotUsed[index]) {
+                            slot = index;
+                            m_spatialSlotUsed[index] = true;
+                            m_spatialAssignments.emplace(key, index);
+                            break;
+                        }
+                    }
                 }
-                ++spatialIndex;
+                bool spatialized = false;
+                if (slot != kNoSpatialSlot) {
+                    spatialized = m_spatializers[slot].Process(
+                        m_monoScratch, m_stereoScratch, spatialListener, spatialSource);
+                }
+                if (spatialized) {
+                    AccumulateStereo(m_stereoScratch.data(), frames, gain, busBuffer);
+                } else {
+                    // Distance-attenuated centre pan: the voice stays audible
+                    // when every spatializer is busy or HRTF processing rejects
+                    // the input, instead of dropping out for the whole block.
+                    const float fallbackGain = gain * spatialSource.gain * 0.70710678f;
+                    for (std::uint32_t frame = 0; frame < frames; ++frame) {
+                        const float sample = m_monoScratch[frame] * fallbackGain;
+                        busBuffer[frame * 2u] += sample;
+                        busBuffer[frame * 2u + 1u] += sample;
+                    }
+                }
             } else {
                 for (std::uint32_t frame = 0; frame < frames; ++frame) {
                     const float sample = m_monoScratch[frame] * gain;
@@ -191,7 +254,6 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
                 }
             }
         } else {
-            const float pitch = EffectivePitch(voice, listener);
             for (std::uint32_t frame = 0; frame < frames; ++frame) {
                 const std::uint64_t sampleFrame = voice.cursorFrame
                     + static_cast<std::uint64_t>(static_cast<float>(frame) * pitch);
@@ -205,7 +267,7 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
                 busBuffer[frame * 2u + 1u] += samples[clipFrame * 2u + 1u] * gain;
             }
         }
-        voices.Advance(voice.handle, frames, desc->frameCount);
+        voices.Advance(voice.handle, advanceFrames, desc->frameCount);
     }
 
     MixBusToMaster(m_musicScratch.data(), frames, 1.0f, m_masterScratch.data());

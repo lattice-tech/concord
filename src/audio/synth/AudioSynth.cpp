@@ -25,7 +25,7 @@ float WaveSample(AudioWaveform waveform, float phase, std::uint32_t& noiseState)
     case AudioWaveform::Noise:
         noiseState = noiseState * 1664525u + 1013904223u;
         return static_cast<float>((noiseState >> 8) & 0x00FFFFFFu)
-            / static_cast<float>(0x007FFFFFu) - 1.0f;
+            / static_cast<float>(0x00800000u) - 1.0f;
     }
     return 0.0f;
 }

@@ -249,6 +249,13 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     const auto particleIt = m_pendingParticleEmitters.find(view);
     const bool hasGpuParticles = particleIt != m_pendingParticleEmitters.end()
         && !particleIt->second.empty();
+    const auto waterIt = m_pendingWaterSurfaces.find(view);
+    const bool hasWater = waterIt != m_pendingWaterSurfaces.end()
+        && !waterIt->second.empty();
+    const auto fluidIt = m_pendingFluids.find(view);
+    const std::uint32_t fluidCount = fluidIt != m_pendingFluids.end()
+        ? std::min(static_cast<std::uint32_t>(fluidIt->second.size()), kMaxRenderFluids)
+        : 0u;
     // Offscreen HDR scene + present blit (dither to 8-bit). Used for every AA
     // mode when the RT came up; not limited to FXAA/SMAA.
     const bool postProcess = slot.scene.Valid() && slot.presentView != kInvalidRenderView;
@@ -334,6 +341,50 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
         m_gpuParticles.Simulate(
             view, slot.particleComputeView, particleIt->second);
     }
+    if (fluidCount > 0 && slot.fluidComputeView != kInvalidRenderView) {
+        m_fluid.Simulate(view, slot.fluidComputeView, fluidIt->second.data(),
+                         fluidCount);
+    }
+    // Water and the reconstructed fluid surface composite onto the resolved
+    // opaque scene and write depth, so the cloud and smoke passes that follow
+    // are still occluded by them.
+    const auto drawWaterAndFluids = [&]() {
+        if (hasWater) {
+            RenderWater(slot, viewMtx, projMtx, cameraEye, nearPlane, farPlane,
+                        environment, lights, lightCount, waterIt->second.data(),
+                        static_cast<std::uint32_t>(waterIt->second.size()));
+        }
+        if (fluidCount > 0 && slot.fluidSurfaceView != kInvalidRenderView
+            && slot.scene.Valid()) {
+            BgfxFluidRenderer::DrawParams fluidParams;
+            fluidParams.ownerView = view;
+            fluidParams.view = slot.fluidSurfaceView;
+            fluidParams.sceneFb = slot.scene.framebuffer;
+            fluidParams.width = slot.width;
+            fluidParams.height = slot.height;
+            fluidParams.viewMatrix = viewMtx;
+            fluidParams.projectionMatrix = projMtx;
+            fluidParams.eye = cameraEye;
+            fluidParams.lights = lights;
+            fluidParams.lightCount = lightCount;
+            fluidParams.sceneColor = slot.scene.color;
+            fluidParams.sceneDepth = slot.scene.depth;
+            fluidParams.sceneColorCopy = slot.sceneColorCopy;
+            fluidParams.sceneDepthCopy = slot.sceneDepthCopy;
+            fluidParams.nearPlane = nearPlane;
+            fluidParams.farPlane = farPlane;
+            m_fluid.Draw(fluidParams, environment, fluidIt->second.data(),
+                         fluidCount);
+        }
+    };
+    const auto clearWaterAndFluids = [&]() {
+        if (waterIt != m_pendingWaterSurfaces.end()) {
+            waterIt->second.clear();
+        }
+        if (fluidIt != m_pendingFluids.end()) {
+            fluidIt->second.clear();
+        }
+    };
     if (!hasDraws) {
         if (pendingIt != m_pendingDraws.end()) {
             pendingIt->second.clear();
@@ -355,11 +406,13 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
             particleIt->second.clear();
         }
         if (postProcess) {
+            drawWaterAndFluids();
             RenderVolumeClouds(slot, viewMtx, projMtx, cameraEye, environment, lights, lightCount);
             RenderVolumeSmoke(slot, viewMtx, projMtx, cameraEye, lights, lightCount,
                               smokeVolumes, smokeVolumeCount);
             RunPostProcess(view, slot, particleBloomSource, effectsPtr);
         }
+        clearWaterAndFluids();
         DrawPrintStringOverlay(view, slot, postProcess);
         return;
     }
@@ -803,6 +856,7 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     // Volumetric clouds composite into the HDR scene color, truncated by scene
     // depth, before bloom and the tone-mapped present.
     if (postProcess) {
+        drawWaterAndFluids();
         RenderVolumeClouds(slot, viewMtx, projMtx, cameraEye, environment, lights, lightCount);
         RenderVolumeSmoke(slot, viewMtx, projMtx, cameraEye, lights, lightCount,
                           smokeVolumes, smokeVolumeCount);
@@ -816,6 +870,7 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     DrawPrintStringOverlay(view, slot, postProcess);
     MaybeCaptureFrame(slot);
 
+    clearWaterAndFluids();
     pendingIt->second.clear();
     if (const auto casterIt = m_pendingShadowCasters.find(view);
         casterIt != m_pendingShadowCasters.end()) {

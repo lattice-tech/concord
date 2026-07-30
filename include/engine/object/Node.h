@@ -8,10 +8,12 @@
 #include "engine/object/PersistentObjectId.h"
 #include "engine/object/ReflectionMode.h"
 #include "engine/render/frame/CameraView.h"
+#include "engine/render/frame/RenderFluid.h"
 #include "engine/render/frame/RenderInstance.h"
 #include "engine/render/frame/RenderLight.h"
 #include "engine/render/frame/RenderParticleEmitter.h"
 #include "engine/render/frame/RenderSmokeVolume.h"
+#include "engine/render/frame/RenderWaterSurface.h"
 #include "math/Quaternion.h"
 #include "math/Vector3.h"
 
@@ -197,6 +199,12 @@ private:
 
     /** Appends this node's smoke volume(s) for the frame (SmokeVolume nodes only). */
     virtual void CollectSmokeVolumes(std::vector<RenderSmokeVolume>& out) const { (void)out; }
+
+    /** Appends this node's water surface(s) for the frame (WaterBody nodes only). */
+    virtual void CollectWaterSurfaces(std::vector<RenderWaterSurface>& out) const { (void)out; }
+
+    /** Appends this node's DFSPH fluid body for the frame (FluidWater nodes only). */
+    virtual void CollectFluids(std::vector<RenderFluid>& out) const { (void)out; }
 
     /** Appends this node to the frame's collider list (collider nodes only). */
     virtual void CollectColliders(std::vector<Collider*>& out) { (void)out; }

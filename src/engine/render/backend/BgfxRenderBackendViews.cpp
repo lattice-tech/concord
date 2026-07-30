@@ -149,6 +149,20 @@ bool BgfxRenderBackend::CreateFramebufferForView(RenderViewHandle view, const Re
                 slot.smokeFb = bgfx::createFrameBuffer(2, smokeAttachments, true);
             }
 
+            // Full-res blit copies of the resolved opaque scene, snapshotted
+            // at the start of the water view so water/fluid refraction can
+            // sample the scene without reading the target it draws into.
+            // Optional: if they fail the water pass simply skips refraction.
+            if ((bgfx::getCaps()->supported & BGFX_CAPS_TEXTURE_BLIT) != 0) {
+                slot.sceneColorCopy = bgfx::createTexture2D(
+                    w, h, false, 1, bgfx::TextureFormat::RGBA16F,
+                    BGFX_TEXTURE_BLIT_DST | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP);
+                slot.sceneDepthCopy = bgfx::createTexture2D(
+                    w, h, false, 1, bgfx::TextureFormat::D24S8,
+                    BGFX_TEXTURE_BLIT_DST | BGFX_SAMPLER_POINT
+                        | BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP);
+            }
+
             m_views[view] = slot;
             return true;
         }
@@ -208,6 +222,7 @@ RenderViewHandle BgfxRenderBackend::CreateView(const RenderViewInit& init)
     // DFSPH fluid simulation and surface reconstruction likewise run on their
     // own view: mixing compute dispatches into the scene view corrupts the
     // backend's pass state on Vulkan.
+    const RenderViewHandle fluidComputeViewId = static_cast<RenderViewHandle>(nextView++);
     // planar (mirrored scene) → six-face reflection capture → scene
     const RenderViewHandle planarViewId = static_cast<RenderViewHandle>(nextView++);
     std::array<RenderViewHandle, ReflectionCapture::kFaceCount> reflectionViews{};
@@ -219,6 +234,11 @@ RenderViewHandle BgfxRenderBackend::CreateView(const RenderViewInit& init)
     // so its cluster range/index textures are ready when the scene samples them.
     const RenderViewHandle lightCullViewId = static_cast<RenderViewHandle>(nextView++);
     const RenderViewHandle view = static_cast<RenderViewHandle>(nextView++);
+    // Water composites onto the resolved opaque scene right after the scene
+    // view; the reconstructed fluid surface draws right after the water so
+    // both still occlude the cloud/smoke composites below.
+    const RenderViewHandle waterViewId = static_cast<RenderViewHandle>(nextView++);
+    const RenderViewHandle fluidSurfaceViewId = static_cast<RenderViewHandle>(nextView++);
     // Volumetric clouds run right after the scene view and before the
     // SMAA/bloom/present block: a half-res march view then a composite view
     // that upsamples into the HDR scene color.
@@ -234,6 +254,10 @@ RenderViewHandle BgfxRenderBackend::CreateView(const RenderViewInit& init)
     seed.planarView = planarViewId;
     seed.reflectionViews = reflectionViews;
     seed.particleComputeView = particleComputeViewId;
+    seed.fluidComputeView = fluidComputeViewId;
+    seed.waterBakeView = waterBakeViewId;
+    seed.waterView = waterViewId;
+    seed.fluidSurfaceView = fluidSurfaceViewId;
     seed.depthPrepassView = depthPrepassViewId;
     seed.lightCullView = lightCullViewId;
     seed.cloudView = cloudViewId;
@@ -308,6 +332,10 @@ RenderViewHandle BgfxRenderBackend::CreateView(const RenderViewInit& init)
     }
     bgfx::setViewName(seed.planarView, "PlanarReflection");
     bgfx::setViewName(seed.particleComputeView, "GPU particles: simulate");
+    bgfx::setViewName(seed.fluidComputeView, "Fluid/Compute");
+    bgfx::setViewName(seed.waterBakeView, "Water/CascadeBake");
+    bgfx::setViewName(seed.waterView, "Water/Draw");
+    bgfx::setViewName(seed.fluidSurfaceView, "Fluid/Surface");
     bgfx::setViewName(seed.depthPrepassView, "ForwardPlus/DepthPrepass");
     bgfx::setViewName(seed.lightCullView, "ForwardPlus/LightCull");
     static constexpr const char* kReflectionNames[ReflectionCapture::kFaceCount] = {
@@ -403,10 +431,13 @@ void BgfxRenderBackend::DestroyView(RenderViewHandle view)
     m_gpuParticles.DestroyView(view);
     m_smaa.Release(view);
     m_viewBlocks.Release(view - (1 + kShadowCascadeCount + 4 + ReflectionCapture::kFaceCount + 1));
+    m_fluid.DestroyView(view);
     m_views.erase(it);
     m_pendingDraws.erase(view);
     m_pendingShadowCasters.erase(view);
     m_pendingParticleEmitters.erase(view);
+    m_pendingWaterSurfaces.erase(view);
+    m_pendingFluids.erase(view);
 }
 
 void BgfxRenderBackend::DestroyViewTargets(ViewSlot& slot)
@@ -426,6 +457,14 @@ void BgfxRenderBackend::DestroyViewTargets(ViewSlot& slot)
     }
     slot.smokeColor = BGFX_INVALID_HANDLE;
     slot.smokeDepthProxy = BGFX_INVALID_HANDLE;
+    if (bgfx::isValid(slot.sceneColorCopy)) {
+        bgfx::destroy(slot.sceneColorCopy);
+        slot.sceneColorCopy = BGFX_INVALID_HANDLE;
+    }
+    if (bgfx::isValid(slot.sceneDepthCopy)) {
+        bgfx::destroy(slot.sceneDepthCopy);
+        slot.sceneDepthCopy = BGFX_INVALID_HANDLE;
+    }
     m_postProcess.DestroyTargets(slot.scene);
     m_bloom.DestroyTargets(slot.bloom);
     if (bgfx::isValid(slot.framebuffer)) {

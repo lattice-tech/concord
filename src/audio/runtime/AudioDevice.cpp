@@ -119,24 +119,27 @@ void AudioDevice::FillBufferedAudio(int requestedBytes) noexcept
     // Held for the whole fill so the main thread cannot mutate voices, clips,
     // the listener or bus state mid-mix (torn reads audible as static).
     std::lock_guard<std::recursive_mutex> lock(*m_renderLock);
+    // Always render whole fixed-size blocks: the HRTF spatializer's overlap
+    // history assumes exactly frameSize frames per call, so a short tail block
+    // would inject zero-padded silence into its convolution every fill and be
+    // audible as periodic clicks. Overfilling by less than one block is fine —
+    // the extra simply raises the queue slightly above target.
     const int chunkBytes = static_cast<int>(m_chunkScratch.size() * sizeof(float));
+    const std::uint32_t chunkFrames = static_cast<std::uint32_t>(m_chunkScratch.size() / 2u);
+    if (chunkFrames == 0) {
+        return;
+    }
     const auto start = Clock::now();
     int remaining = requestedBytes;
     while (remaining > 0) {
-        const int bytes = std::min(remaining, chunkBytes);
-        const std::uint32_t frames = static_cast<std::uint32_t>(bytes / (sizeof(float) * 2));
-        if (frames == 0) {
-            break;
-        }
-        m_mixer->Render(m_chunkScratch.data(), frames, *m_listener,
+        m_mixer->Render(m_chunkScratch.data(), chunkFrames, *m_listener,
                         *m_clips, *m_voices, *m_buses, *m_stats);
-        if (!SDL_PutAudioStreamData(m_stream, m_chunkScratch.data(),
-                                    static_cast<int>(frames * 2u * sizeof(float)))) {
+        if (!SDL_PutAudioStreamData(m_stream, m_chunkScratch.data(), chunkBytes)) {
             ++m_stats->underrunCount;
             std::fprintf(stderr, "[audio] SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
             break;
         }
-        remaining -= static_cast<int>(frames * 2u * sizeof(float));
+        remaining -= chunkBytes;
     }
     m_stats->callbackCpuMs = std::chrono::duration<float, std::milli>(
         Clock::now() - start).count();

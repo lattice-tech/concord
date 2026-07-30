@@ -3,10 +3,12 @@
 
 #include "engine/render/frame/CameraView.h"
 #include "engine/environment/RenderEnvironment.h"
+#include "engine/render/frame/RenderFluid.h"
 #include "engine/render/frame/RenderInstance.h"
 #include "engine/render/frame/RenderLight.h"
 #include "engine/render/frame/RenderParticleEmitter.h"
 #include "engine/render/frame/RenderSmokeVolume.h"
+#include "engine/render/frame/RenderWaterSurface.h"
 #include "engine/render/frame/SkyEnvironment.h"
 
 #include <cstdint>
@@ -34,6 +36,8 @@ struct WorldSnapshot {
     std::vector<RenderParticleEmitter> particleEmitters;
     std::vector<RenderLight> lights;
     std::vector<RenderSmokeVolume> smokeVolumes;
+    std::vector<RenderWaterSurface> waterSurfaces;
+    std::vector<RenderFluid> fluids;
     std::vector<float> boneMatrices;
     CameraView camera{};
     SkyEnvironment sky{};

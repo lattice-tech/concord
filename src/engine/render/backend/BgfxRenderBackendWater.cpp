@@ -42,6 +42,20 @@ void BgfxRenderBackend::SubmitWaterSurface(RenderViewHandle view,
     m_pendingWaterSurfaces[view].push_back(surface);
 }
 
+void BgfxRenderBackend::SubmitFluid(RenderViewHandle view, const RenderFluid& fluid)
+{
+    if (!m_initialized || view == kInvalidRenderView || fluid.particleCount == 0
+        || fluid.fluidKey == 0) {
+        return;
+    }
+    for (float component : fluid.world) {
+        if (!std::isfinite(component)) {
+            return;
+        }
+    }
+    m_pendingFluids[view].push_back(fluid);
+}
+
 void BgfxRenderBackend::RenderWater(ViewSlot& slot, const float viewMatrix[16],
                                     const float projectionMatrix[16], const float eye[3],
                                     float nearPlane, float farPlane,

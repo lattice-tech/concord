@@ -231,6 +231,7 @@ void BgfxRenderBackend::Frame()
     }
     bgfx::frame();
     m_gpuParticles.EndFrame();
+    m_fluid.EndFrame();
     const bgfx::Stats* stats = bgfx::getStats();
     m_frameStats = {};
     if (stats == nullptr) {
@@ -298,6 +299,8 @@ void BgfxRenderBackend::Shutdown() noexcept
         m_volumeSmoke.Shutdown();
         m_gpuLightCuller.Shutdown();
         m_gpuParticles.Shutdown();
+        m_water.Shutdown();
+        m_fluid.Shutdown();
         m_shadowMap.Shutdown();
         m_debugText.Shutdown();
         m_uiRenderer.Shutdown();

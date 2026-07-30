@@ -159,9 +159,17 @@ public:
         params.hrtf = m_hrtf;
         iplBinauralEffectApply(m_effect, &params, &m_input, &m_output);
 
+        // A single NaN/Inf from the effect would poison the mix bus for the
+        // whole block, so reject the output and let the mixer's pan fallback
+        // keep the voice audible instead.
         for (std::size_t i = 0; i < frameSize; ++i) {
-            stereoOutput[i * 2u] = m_output.data[0][i];
-            stereoOutput[i * 2u + 1u] = m_output.data[1][i];
+            const float left = m_output.data[0][i];
+            const float right = m_output.data[1][i];
+            if (!std::isfinite(left) || !std::isfinite(right)) {
+                return false;
+            }
+            stereoOutput[i * 2u] = left;
+            stereoOutput[i * 2u + 1u] = right;
         }
         return true;
     }

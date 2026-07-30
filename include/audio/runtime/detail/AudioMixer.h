@@ -10,6 +10,7 @@
 #include "audio/spatial/SteamAudioSpatializer.h"
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace Concord::Audio::Detail {
@@ -46,6 +47,14 @@ private:
     std::vector<float> m_uiScratch;
     std::vector<float> m_dialogueScratch;
     std::vector<ActiveVoiceView> m_activeVoices;
+    /**
+     * Stable voice -> spatializer assignment. HRTF effects carry per-voice
+     * convolution history, so a voice must keep the same spatializer across
+     * frames even when distance sorting reorders the active list; reassigning
+     * by traversal order made histories switch owners, audible as pops.
+     */
+    std::unordered_map<std::uint64_t, std::uint32_t> m_spatialAssignments;
+    std::vector<bool> m_spatialSlotUsed;
     AudioRuntimeConfig m_config{};
     bool m_initialized = false;
 };
