@@ -79,11 +79,13 @@ vec3 getNoise(vec2 uv)
 	float n1 = WaterValueNoise(uv1);
 	float n2 = WaterValueNoise(uv2);
 	float n3 = WaterValueNoise(uv3);
-	float sum = (n0 + n1 + n2 + n3) * 0.5 - 1.0; // [-1,1]
-	// Build a tangent-space normal: the noise drives horizontal slope, z is the
-	// reconstructed up component so the vector stays near-unit and points up.
-	float nx = sum * 0.45;
-	float nz = sum * 0.45;
+	// Two independent slope channels. A single shared scalar would tilt every
+	// ripple along the same diagonal, which shades as parallel light/dark
+	// stripes instead of an isotropic chop.
+	float sx = (n0 + n2) - 1.0; // [-1,1]
+	float sz = (n1 + n3) - 1.0; // [-1,1]
+	float nx = sx * 0.55;
+	float nz = sz * 0.55;
 	float ny = sqrt(max(1.0 - nx * nx - nz * nz, 0.0));
 	return vec3(nx, ny, nz);
 }
@@ -156,7 +158,13 @@ void main()
 	vec3 noise = normalize(noiseCoarse + noiseFine * 0.4);
 	vec3 rippleNormal = normalize(noise.xzy * vec3(1.5, 1.0, 1.5));
 	vec3 waveNormal = WaveNormal(v_wpos.xz);
+	float viewDist = length(u_waterCamera.xyz - v_wpos.xyz);
+	// Distant water flattens toward the plane normal: ripple frequencies far
+	// beyond pixel size only alias, and a calm far field mirrors the sky the
+	// way a real horizon does.
+	float flatten = smoothstep(40.0, 260.0, viewDist);
 	vec3 surfaceNormal = normalize(waveNormal + vec3(rippleNormal.x, 0.0, rippleNormal.z) * 0.55);
+	surfaceNormal = normalize(mix(surfaceNormal, vec3(0.0, 1.0, 0.0), flatten * 0.85));
 
 	vec3 diffuseLight = vec3(0.0);
 	vec3 specularLight = vec3(0.0);
@@ -169,10 +177,10 @@ void main()
 
 	float distance = length(worldToEye);
 	float distScale = clamp(u_waterOptics.y, 0.05, 1.5);
-	// Only the fine ripple layer feeds the refraction offset: the Gerstner
-	// normal has kilometre-long straight wavefronts which read as long jagged
-	// polylines in the refracted image instead of a shimmering surface.
-	vec2 distortion = rippleNormal.xz * (0.0006 + 0.02 / max(distance, 1.0)) * distScale;
+	// The full shaded normal drives the refraction offset so both the swell
+	// and the ripples visibly bend the underwater image (safe now that the
+	// screen UV is perspective-correct).
+	vec2 distortion = surfaceNormal.xz * (0.008 + 0.05 / max(distance, 1.0)) * distScale;
 	// Perspective-correct screen UV from the interpolated clip position.
 	vec2 ndc = v_cascade.xy / max(v_cascade.w, 1e-4);
 	vec2 screenUv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
@@ -200,7 +208,7 @@ void main()
 		// deep column bends more — like looking through a convex lens — while
 		// the ripple layer only adds shimmer on top.
 		vec3 refrDir = refract(-eyeDirection, surfaceNormal, 0.75);
-		float lensScale = clamp(waterColumn, 0.0, 3.0) / max(distance, 2.0);
+		float lensScale = clamp(waterColumn, 0.0, 3.0) / max(distance, 2.0) * 2.0;
 		// The offset dies out toward the screen border: a bent sample outside
 		// the copy would clamp-stretch the edge pixels into smeared streaks.
 		vec2 edge = min(screenUv, vec2_splat(1.0) - screenUv);
@@ -285,11 +293,13 @@ void main()
 
 	// Aerial perspective: far water converges on the analytic sky reflection,
 	// so the surface meets the sky softly instead of on a hard painted edge.
-	float farPlane = max(u_waterDepthParams.y, 1.0);
-	float horizonFade = smoothstep(farPlane * 0.55, farPlane * 0.98, distance);
+	// Driven by the grazing angle rather than raw distance, so the blend
+	// tracks where the surface visually meets the sky at any camera height.
+	float grazing = 1.0 - theta;
+	float horizonFade = smoothstep(0.82, 0.995, grazing) * smoothstep(30.0, 150.0, distance);
 	vec3 skyAtHorizon = mix(u_waterSkyHorizon.xyz, u_waterSkyZenith.xyz, 0.15)
 		* clamp(u_waterSkyZenith.w, 0.0, 1.2);
-	albedo = mix(albedo, skyAtHorizon, horizonFade * 0.85);
+	albedo = mix(albedo, skyAtHorizon, horizonFade * 0.9);
 
 	// Opaque: the surface is a solid plane, not a transparent layer.
 	gl_FragColor = vec4(albedo, 1.0);
