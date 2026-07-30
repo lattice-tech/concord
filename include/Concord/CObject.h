@@ -15,6 +15,8 @@
 #include "engine/object/ModelDesc.h"
 #include "engine/object/Node.h"
 #include "engine/object/ObjectId.h"
+#include "engine/object/ObjectHandle.h"
+#include "engine/object/PersistentObjectId.h"
 #include "engine/object/PrimitiveShape.h"
 #include "engine/object/ReflectionMode.h"
 #include "engine/object/SkinnedModel.h"

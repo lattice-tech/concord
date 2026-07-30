@@ -19,6 +19,14 @@ namespace Concord {
  */
 class PlanarReflection {
 public:
+    /**
+     * Fraction of the scene resolution the mirrored camera renders at.
+     *
+     * The mirrored camera redraws the entire scene — shadows, light culling,
+     * particles — so this scale multiplies the cost of a whole frame. Half
+     * resolution is the only setting that pays for itself on a surface as large
+     * as water, which distorts the reflection anyway.
+     */
     static constexpr float kResolutionScale = 0.5f;
 
     struct Targets {

@@ -8,13 +8,17 @@
 #include "engine/asset/import/ImportedModel.h"
 #include "engine/material/MaterialDesc.h"
 #include "engine/object/Node.h"
+#include "engine/collision/Aabb.h"
 #include "engine/object/SkinnedModelDesc.h"
 #include "engine/render/frame/RenderInstance.h"
 #include "engine/render/mesh/MeshData.h"
 #include "engine/render/mesh/MeshHandle.h"
+#include "engine/render/mesh/SkinnedMeshBounds.h"
 #include "math/Matrix4.h"
 
 #include <cstddef>
+#include <future>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -97,8 +101,17 @@ public:
 
 private:
     void Advance(float deltaTime);
+    void PrewarmMeshes();
     void CollectRender(std::vector<RenderInstance>& out) const override;
     MeshHandle EnsureMesh(std::size_t i) const;
+    void PollImportedModel() const;
+
+    /**
+     * Recomputes each sub-mesh's conservative model-space box for the current
+     * palette. Called after every palette rebuild so extraction culling sees
+     * the posed extents instead of assuming the unit cube.
+     */
+    void RefreshPoseBounds();
 
     Transform m_transform{};
     Animation::Skeleton m_skeleton;
@@ -119,7 +132,19 @@ private:
     /** Column-major bone matrices for the current pose; referenced by RenderInstance. */
     std::vector<Matrix4> m_palette;
 
+    /** Rest bounds grouped by influencing bone, per sub-mesh; measured once on load. */
+    std::vector<std::vector<SkinnedBoneBounds>> m_subMeshBoneBounds;
+    /** True per sub-mesh when some vertex is unweighted and collapses to the origin. */
+    std::vector<bool> m_subMeshHasUnweighted;
+    /** Conservative model-space box per sub-mesh for the current palette. */
+    std::vector<Collision::Aabb> m_poseBounds;
+
+    mutable std::future<Asset::ImportedModel> m_importFuture;
+    mutable bool m_importResolved = false;
+    mutable std::optional<std::string> m_pendingImportPath;
+
     mutable std::vector<MeshHandle> m_meshes;
+    mutable std::vector<std::future<MeshHandle>> m_meshFutures;
 };
 
 } // namespace Concord::Object

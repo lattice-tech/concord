@@ -66,10 +66,10 @@ function Build-Shader([string]$file, [string]$type, [string]$varyingDef, [string
             if (-not [string]::IsNullOrEmpty($defines)) { $defineArgs = @("--define", $defines) }
             if ($type -eq "compute") {
                 & $Shaderc -f $src -o $out --bin2c $arr --type $type `
-                    --platform $t.platform -p $t.profile -O 3 -i $Include @defineArgs
+                    --platform $t.platform -p $t.profile -O 3 -i $Include -i $here @defineArgs
             } else {
                 & $Shaderc -f $src -o $out --bin2c $arr --type $type `
-                    --platform $t.platform -p $t.profile -O 3 -i $Include --varyingdef $varyingDef @defineArgs
+                    --platform $t.platform -p $t.profile -O 3 -i $Include -i $here --varyingdef $varyingDef @defineArgs
             }
             if ($LASTEXITCODE -ne 0) { throw "shaderc failed for $arr" }
             [System.IO.File]::AppendAllText(
@@ -109,6 +109,12 @@ Build-Shader "vs_volcloud.sc" "vertex" $varyingVolCloud
 Build-Shader "fs_volcloud.sc" "fragment" $varyingVolCloud
 Build-Shader "vs_volcloud_composite.sc" "vertex" $varyingVolCloud
 Build-Shader "fs_volcloud_composite.sc" "fragment" $varyingVolCloud
+$varyingWater = Join-Path $here "varying_water.def.sc"
+Build-Shader "vs_water.sc" "vertex" $varyingWater
+Build-Shader "fs_water.sc" "fragment" $varyingWater
+$varyingWaterBake = Join-Path $here "varying_water_bake.def.sc"
+Build-Shader "vs_water_bake.sc" "vertex" $varyingWaterBake
+Build-Shader "fs_water_bake.sc" "fragment" $varyingWaterBake
 $varyingSmoke = Join-Path $here "varying_smoke.def.sc"
 Build-Shader "vs_smoke.sc" "vertex" $varyingSmoke
 # Two variants of the same source: SMOKE_MRT=1 (main path, writes the depth
@@ -126,7 +132,30 @@ Build-Shader "fs_smaa_weights.sc" "fragment" $varyingPresent
 Build-Shader "fs_smaa_blend.sc" "fragment" $varyingPresent
 Build-Shader "cs_raytrace.sc" "compute" $varying
 Build-Shader "cs_light_cull.sc" "compute" $varying
+# DFSPH fluid: neighbor search, dual-constraint solver, field, sparse MC.
+Build-Shader "cs_fluid_grid_clear.sc" "compute" $varying
+Build-Shader "cs_fluid_grid_count.sc" "compute" $varying
+Build-Shader "cs_fluid_grid_scan.sc" "compute" $varying
+Build-Shader "cs_fluid_grid_scatter.sc" "compute" $varying
+Build-Shader "cs_fluid_density.sc" "compute" $varying
+Build-Shader "cs_fluid_forces.sc" "compute" $varying
+Build-Shader "cs_fluid_divergence.sc" "compute" $varying
+Build-Shader "cs_fluid_pressure.sc" "compute" $varying
+Build-Shader "cs_fluid_apply.sc" "compute" $varying
+Build-Shader "cs_fluid_integrate.sc" "compute" $varying
+Build-Shader "cs_fluid_finalize.sc" "compute" $varying
+Build-Shader "cs_fluid_field_splat.sc" "compute" $varying
+Build-Shader "cs_fluid_field_smooth.sc" "compute" $varying
+Build-Shader "cs_fluid_mc_voxels.sc" "compute" $varying
+Build-Shader "cs_fluid_mc_triangles.sc" "compute" $varying
+$varyingFluid = Join-Path $here "varying_fluid.def.sc"
+Build-Shader "vs_fluid_surface.sc" "vertex" $varyingFluid
+Build-Shader "fs_fluid_surface.sc" "fragment" $varyingFluid
 Build-Shader "fs_rtresolve.sc" "fragment" $varyingPresent
 $varyingDebugText = Join-Path $here "varying_debugtext.def.sc"
 Build-Shader "vs_debugtext.sc" "vertex" $varyingDebugText
 Build-Shader "fs_debugtext.sc" "fragment" $varyingDebugText
+# UI images share vs_debugtext's screen-space vertices but sample RGBA instead
+# of a single coverage channel.
+Build-Shader "fs_ui_image.sc" "fragment" $varyingDebugText
+

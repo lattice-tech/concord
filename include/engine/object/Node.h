@@ -4,6 +4,8 @@
 #include "Concord/CExport.h"
 #include "engine/object/Transform.h"
 #include "engine/object/ObjectId.h"
+#include "engine/object/ObjectHandle.h"
+#include "engine/object/PersistentObjectId.h"
 #include "engine/object/ReflectionMode.h"
 #include "engine/render/frame/CameraView.h"
 #include "engine/render/frame/RenderInstance.h"
@@ -53,8 +55,14 @@ public:
     Node(const Node&) = delete;
     Node& operator=(const Node&) = delete;
 
-    /** Stable ECS entity identity for this node's lifetime. */
+    /** Monotonic scene-local correlation ID retained for event compatibility. */
     ObjectId Id() const noexcept { return m_id; }
+
+    /** Generation-safe identity for resolving this node through its Scene. */
+    ObjectHandle Handle() const noexcept { return m_handle; }
+
+    /** Stable identity preserved by scene serialization and migrations. */
+    PersistentObjectId PersistentId() const noexcept { return m_persistentId; }
 
     /**
      * Selects the reflection source for this node's renderable geometry.
@@ -218,6 +226,8 @@ private:
     std::function<void(float)> m_onUpdate;
     bool m_started = false;
     ObjectId m_id = kInvalidObjectId;
+    ObjectHandle m_handle{};
+    PersistentObjectId m_persistentId{};
 };
 
 } // namespace Object

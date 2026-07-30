@@ -56,6 +56,18 @@ struct FrameStats {
     bool gpuStatsValid = false;
     /** Number of colliders evaluated by the latest world snapshot. */
     std::uint32_t colliderCount = 0;
+    /** Authored mesh instances before frustum cull. */
+    std::uint32_t visibilityAuthored = 0;
+    /** Mesh instances culled by the camera frustum. */
+    std::uint32_t visibilityCulled = 0;
+    /** Mesh instances submitted after cull. */
+    std::uint32_t visibilitySubmitted = 0;
+    /** Spatial tree nodes visited during visibility cull. */
+    std::uint32_t visibilityNodesVisited = 0;
+    /** Off-screen draws kept for the shadow pass (subset of visibilityCulled). */
+    std::uint32_t visibilityShadowCasters = 0;
+    /** CPU ms spent on frustum visibility cull. */
+    float visibilityMs = 0.0f;
     /** Number of GPU views/passes measured by the backend. */
     std::uint32_t gpuPassCount = 0;
     /** Slowest measured GPU pass duration. */

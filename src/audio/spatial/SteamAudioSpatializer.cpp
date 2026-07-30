@@ -63,7 +63,9 @@ public:
         IPLHRTFSettings hrtfSettings{};
         hrtfSettings.type = IPL_HRTFTYPE_DEFAULT;
         hrtfSettings.volume = 1.0f;
-        hrtfSettings.normType = IPL_HRTFNORMTYPE_NONE;
+        // RMS-normalized HRTF set: consistent loudness across directions, no
+        // piercing peaks from the raw default set.
+        hrtfSettings.normType = IPL_HRTFNORMTYPE_RMS;
         if (iplHRTFCreate(m_context, &m_audioSettings, &hrtfSettings, &m_hrtf)
             != IPL_STATUS_SUCCESS) {
             Shutdown();
@@ -150,7 +152,9 @@ public:
         IPLBinauralEffectParams params{};
         params.direction = IPLVector3{
             steamDirection.x, steamDirection.y, steamDirection.z};
-        params.interpolation = IPL_HRTFINTERPOLATION_NEAREST;
+        // Bilinear HRTF interpolation: a moving source glides instead of
+        // buzzing as it crosses between nearest HRTF measurements.
+        params.interpolation = IPL_HRTFINTERPOLATION_BILINEAR;
         params.spatialBlend = std::clamp(source.spatialBlend, 0.0f, 1.0f);
         params.hrtf = m_hrtf;
         iplBinauralEffectApply(m_effect, &params, &m_input, &m_output);

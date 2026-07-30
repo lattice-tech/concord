@@ -102,6 +102,9 @@ void Node::OnUpdate(std::function<void(float)> callback)
 bool Node::SetParent(Node* parent)
 {
     std::lock_guard<std::recursive_mutex> lock(GraphMutex());
+    if (m_scene != nullptr && !m_scene->IsAlive(m_handle)) {
+        return false;
+    }
     if (parent == m_parent) {
         return true;
     }
@@ -110,6 +113,9 @@ bool Node::SetParent(Node* parent)
     }
     if (parent != nullptr) {
         if (m_scene != parent->m_scene) {
+            return false;
+        }
+        if (m_scene != nullptr && !m_scene->IsAlive(parent->m_handle)) {
             return false;
         }
         for (const Node* ancestor = parent; ancestor != nullptr; ancestor = ancestor->m_parent) {

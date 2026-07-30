@@ -25,6 +25,12 @@ struct WorldSnapshot {
     std::uint64_t generation = 0;
     std::uint64_t simulationFrame = 0;
     std::vector<RenderInstance> instances;
+    /**
+     * Opaque draws the camera frustum rejected whose shadow can still fall
+     * inside the view. Consumed only by the shadow depth pass
+     * (IRenderBackend::SubmitShadowCaster), never drawn as visible geometry.
+     */
+    std::vector<RenderInstance> shadowCasters;
     std::vector<RenderParticleEmitter> particleEmitters;
     std::vector<RenderLight> lights;
     std::vector<RenderSmokeVolume> smokeVolumes;
@@ -39,8 +45,19 @@ struct WorldSnapshot {
     bool hasEnvironment = false;
     std::uint32_t nodeCount = 0;
     std::uint32_t colliderCount = 0;
+    /** Mesh instances collected before frustum culling. */
+    std::uint32_t visibilityAuthored = 0;
+    /** Mesh instances rejected by the camera frustum. */
+    std::uint32_t visibilityCulled = 0;
+    /** Mesh instances surviving cull (submitted to the render thread). */
+    std::uint32_t visibilitySubmitted = 0;
+    /** BVH nodes visited during the visibility tree walk. */
+    std::uint32_t visibilityNodesVisited = 0;
+    /** Off-screen draws kept for the shadow pass (subset of visibilityCulled). */
+    std::uint32_t visibilityShadowCasters = 0;
     float nodeCallbackMs = 0.0f;
     float extractionMs = 0.0f;
+    float visibilityMs = 0.0f;
     float collisionMs = 0.0f;
     float taskGraphMs = 0.0f;
     std::uint32_t taskNodeCount = 0;

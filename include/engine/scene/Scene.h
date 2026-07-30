@@ -8,20 +8,30 @@
 #include "engine/environment/EnvironmentSettings.h"
 #include "engine/loop/EngineLoop.h"
 #include "engine/object/Node.h"
+#include "engine/scene/storage/SceneObjectSlot.h"
 #include "engine/render/frame/SkyEnvironment.h"
 #include "engine/ecs/CommandBuffer.h"
 #include "engine/ecs/SystemGraph.h"
+#include "engine/spatial/DynamicAabbTree.h"
+#include "engine/spatial/SpatialId.h"
 
 #include <memory>
 #include <mutex>
 #include <atomic>
 #include <cstdint>
+#include <future>
+#include <functional>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <string>
 
 namespace Concord {
+
+namespace Detail {
+struct SceneLoadBatch;
+}
 
 class Game;
 class SceneIO;
@@ -32,6 +42,7 @@ struct SceneGraphState {
     std::atomic<bool> alive{true};
     std::atomic<bool> active{false};
     std::atomic<std::uint64_t> activationGeneration{0};
+    std::atomic<std::uint32_t> traversalDepth{0};
 };
 
 namespace Object {
@@ -39,6 +50,7 @@ class Camera;
 }
 
 struct MeshData;
+struct WorldSnapshot;
 
 /**
  * A container of nodes the engine renders and ticks together.
@@ -84,6 +96,38 @@ public:
     }
 
     /**
+     * @brief Resolves a live handle to a borrowed node pointer.
+     *
+     * Returns nullptr for stale, foreign, pending-despawn, or invalid handles.
+     * The pointer is intended for immediate coordinator-thread use; retaining
+     * ObjectHandle is the safe cross-frame ownership pattern.
+     */
+    Object::Node* Find(Object::ObjectHandle handle) noexcept;
+    const Object::Node* Find(Object::ObjectHandle handle) const noexcept;
+
+    /**
+     * @brief Resolves a serialized persistent identity to a live node.
+     *
+     * This is the reference-resolution entry point for scene files, save data,
+     * and future Prefab instances. The returned pointer is borrowed; retain the
+     * node's ObjectHandle for generation-safe runtime work.
+     */
+    Object::Node* Find(Object::PersistentObjectId id) noexcept;
+    const Object::Node* Find(Object::PersistentObjectId id) const noexcept;
+
+    /** True only while @p handle names a live node in this Scene. */
+    bool IsAlive(Object::ObjectHandle handle) const noexcept;
+
+    /**
+     * @brief Logically destroys a node and its descendant subtree.
+     *
+     * Successful requests invalidate every affected handle before returning.
+     * Physical destruction is deferred until no Scene traversal can retain a
+     * pointer to the nodes. Repeating a request for a stale handle returns false.
+     */
+    bool Despawn(Object::ObjectHandle handle);
+
+    /**
      * Selects a camera owned by this scene.
      * The first camera added becomes active when no camera has been selected.
      * @return false without changing the active camera when `camera` belongs to
@@ -110,6 +154,9 @@ public:
      * to the render thread. Returns an invalid handle when no loop is bound yet.
      */
     MeshHandle AcquireMesh(const MeshData& data);
+
+    /** Queues `data` for GPU upload without blocking the calling thread. */
+    std::future<MeshHandle> AcquireMeshAsync(MeshData data);
 
     /** Releases a handle previously returned by AcquireMesh; a no-op if invalid. */
     void ReleaseMesh(MeshHandle mesh);
@@ -195,10 +242,18 @@ private:
     void AddNode(std::unique_ptr<Object::Node> node);
 
     /** Commits a fully constructed scene-file batch without exposing partial state. */
-    void CommitLoadedNodes(const SkyEnvironment& environment,
-                           std::vector<std::unique_ptr<Object::Node>> nodes);
+    void CommitLoadedNodes(Detail::SceneLoadBatch batch);
 
     void Tick(float deltaTime, std::uint64_t activationGeneration);
+    TaskGraphStats ResolveCollisions(
+        const std::vector<Object::ObjectHandle>& handles,
+        WorldSnapshot& snapshot, const std::shared_ptr<EngineLoop>& loop,
+        std::uint64_t activationGeneration);
+    void CommitDespawns();
+    Object::Node* ResolveLiveLocked(Object::ObjectHandle handle) const noexcept;
+    Object::ObjectHandle AllocateHandleLocked(Object::Node* node);
+    void SelectFallbackCameraLocked();
+    std::vector<Object::ObjectHandle> SnapshotHandles() const;
     std::vector<Object::Node*> SnapshotNodes() const;
     bool RaycastInternal(const Collision::Ray& ray,
                          const Collision::RaycastFilter& filter,
@@ -206,18 +261,31 @@ private:
 
     std::shared_ptr<SceneGraphState> m_graphState;
     std::vector<std::unique_ptr<Object::Node>> m_nodes;
+    std::vector<Detail::SceneObjectSlot> m_objectSlots;
+    std::vector<std::uint32_t> m_freeObjectSlots;
+    std::vector<std::uint32_t> m_pendingDespawns;
+    std::uint64_t m_sceneIdentity = 0;
 
     Game* m_game = nullptr;
     std::weak_ptr<EngineLoop> m_loop;
     EngineLoop::WindowId m_window = EngineLoop::kInvalidWindowId;
     EngineLoop::UpdateId m_updateId = EngineLoop::kInvalidUpdateId;
-    Object::Camera* m_activeCamera = nullptr; // non-owning; points into m_nodes
+    Object::ObjectHandle m_activeCamera{};
     EnvironmentSettings m_environmentSettings{};
     std::uint64_t m_snapshotGeneration = 0;
     std::atomic<Object::ObjectId> m_nextEntityId{1};
+    std::uint64_t m_nextPersistentId = 1;
     Ecs::World m_ecsWorld;
     Ecs::CommandBuffer m_ecsCommands;
     Ecs::SystemGraph m_ecsSystems;
+
+    /**
+     * Persistent collision broadphase: fat AABBs moved across frames instead of
+     * rebuilding the tree every tick. Keyed by generation-safe ObjectHandle.
+     * Mutated only under m_graphState->mutex (or before unlock for rebuild).
+     */
+    Spatial::DynamicAabbTree m_collisionTree{0.1f};
+    std::unordered_map<Object::ObjectHandle, Spatial::SpatialId> m_collisionProxies;
 };
 
 } // namespace Concord

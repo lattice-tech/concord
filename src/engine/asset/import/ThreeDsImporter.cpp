@@ -45,8 +45,9 @@ bool ThreeDsImporter::SupportsExtension(std::string_view ext) const
     return ext == "3ds";
 }
 
-ImportedModel ThreeDsImporter::Import(const std::string& path)
+ImportedModel ThreeDsImporter::Import(const std::string& path, ImportContext& context)
 {
+    (void)context;
     ImportedModel model;
     model.name = path;
 

@@ -21,8 +21,9 @@ bool ObjImporter::SupportsExtension(std::string_view ext) const
     return ext == "obj";
 }
 
-ImportedModel ObjImporter::Import(const std::string& path)
+ImportedModel ObjImporter::Import(const std::string& path, ImportContext& context)
 {
+    (void)context;
     ImportedModel model;
     model.name = path;
 

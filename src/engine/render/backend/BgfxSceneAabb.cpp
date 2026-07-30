@@ -1,5 +1,7 @@
 #include "engine/render/backend/BgfxSceneAabb.h"
 
+#include "engine/render/frame/ShadowCasterLight.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <limits>
@@ -72,15 +74,9 @@ void TransformSkinnedAabbWorld(float outMin[3], float outMax[3],
 
 int FindShadowCaster(const RenderLight* lights, std::uint32_t count) noexcept
 {
-    if (lights == nullptr) {
-        return -1;
-    }
-    for (std::uint32_t i = 0; i < count; ++i) {
-        if (lights[i].type == LightType::Directional && lights[i].castShadow) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
+    // Shared with scene extraction, which selects shadow casters against the
+    // same light (see engine/render/frame/ShadowCasterLight).
+    return FindShadowCastingLight(lights, count);
 }
 
 } // namespace Concord::RenderDetail

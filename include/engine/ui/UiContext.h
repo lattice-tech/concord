@@ -48,8 +48,28 @@ public:
     /** Fills a rectangle and captures world-pointer input while it is hovered. */
     void Panel(const Rect& rect, Color color);
 
+    /** Draws a panel with optional border and rounded corners. */
+    void Panel(const Rect& rect, Color fill, Color borderColor,
+               float borderThickness, float cornerRadius = 0.0f);
+
     /** Draws left/top-aligned text with its origin at (x, y). */
     void Label(float x, float y, const std::string& text, Color color);
+
+    /**
+     * Draws an image stretched to fill @p rect, modulated by @p tint.
+     *
+     * The path is interned to a TextureId here (a cheap, thread-safe lookup that
+     * touches no file and no GPU resource), so the draw list stays free of
+     * strings and ownership while crossing to the render thread, which decodes
+     * and uploads the image once and shares it with every other user of the same
+     * path. An empty path is ignored; a path that fails to load is reported once
+     * by the texture cache and drawn as the neutral white fallback.
+     *
+     * Images do not capture pointer input: overlay an invisible Panel or a
+     * Button when the image must be clickable.
+     */
+    void Image(const Rect& rect, const std::string& texturePath,
+               Color tint = Rgba(255, 255, 255, 255));
 
     /**
      * Draws an interactive button with a centered label; returns true when a
@@ -123,6 +143,9 @@ private:
     };
 
     void EmitSolidRect(const Rect& rect, Color color);
+    void EmitStyledRect(const Rect& rect, Color fill, Color borderColor,
+                        float borderThickness, float cornerRadius);
+    void EmitTexturedRect(const Rect& rect, std::uint32_t texture, Color tint);
     void EmitText(const Rect& rect, const std::string& text, Color color,
                   Align hAlign, Align vAlign, float fontScale);
     void DrawFocusBorder(const Rect& rect, Color color, float thickness);

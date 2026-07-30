@@ -12,10 +12,10 @@ namespace Concord::UI {
 /**
  * Binary load/save for UI documents in the .cui format.
  *
- * Little-endian POD stream guarded by a magic + version (same discipline as the
- * .cscene scene format): bumping the version invalidates old files rather than
- * silently mis-parsing them. The format is compact and read/written in a single
- * linear pass for fast load times.
+ * File-system adapter for the versioned Asset::CookedUiDocument format. The
+ * payload uses the shared little-endian serialization codec and preserves the
+ * established CUI1 byte layout. The adapter performs bounded whole-file I/O;
+ * decoding completes before the destination document is replaced.
  */
 namespace UiDocumentIO {
 

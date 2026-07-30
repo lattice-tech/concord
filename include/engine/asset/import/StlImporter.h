@@ -20,7 +20,7 @@ namespace Concord::Asset {
 class StlImporter final : public IModelImporter {
 public:
     bool SupportsExtension(std::string_view ext) const override;
-    ImportedModel Import(const std::string& path) override;
+    ImportedModel Import(const std::string& path, ImportContext& context) override;
 };
 
 } // namespace Concord::Asset

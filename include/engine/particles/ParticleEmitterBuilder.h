@@ -300,18 +300,18 @@ inline ParticleEmitter& MagicOrb(Scene& scene, Vector3 pos,
         .Vortex(pos, 8.0f, 2.0f).Attractor(pos, 5.0f, 2.0f)
         .Color(COLOR_RGBA(255, 255, 255, 255), COLOR_RGBA(220, 200, 255, 160),
                COLOR_RGBA(120, 80, 255, 0))
-        .Size(0.08f, 0.04f, 0.0f).Capacity(100).Unlit().Additive().Brightness(3.2f)
+        .Size(0.08f, 0.04f, 0.0f).Capacity(64).GpuSimulation().Unlit().Additive().Brightness(3.2f)
         .Loop()
         .Spawn();
     return Emitter(scene)
-        .At(pos).Sphere(1.1f).Rate(100.0f).Lifetime(1.1f, 1.9f)
+        .At(pos).Sphere(1.1f).Rate(52.0f).Lifetime(1.1f, 1.9f)
         .Direction({0.0f, 1.0f, 0.0f}).Speed(0.5f, 1.4f).Spread(180.0f)
         .Gravity({0.0f, 0.15f, 0.0f}).Drag(0.45f)
         .Turbulence(1.6f, 2.6f)
         .Vortex(pos, 7.5f, 3.5f).Attractor(pos, 3.5f, 3.5f)
         .Color((startColor & 0xffffff00u) | 220u, COLOR_RGBA(180, 140, 255, 140),
                endColor & 0xffffff00u)
-        .Size(0.06f, 0.1f, 0.0f).Capacity(260).Unlit().Additive().Brightness(2.4f)
+        .Size(0.06f, 0.1f, 0.0f).Capacity(96).GpuSimulation().Unlit().Additive().Brightness(2.4f)
         .Loop()
         .Spawn();
 }
@@ -324,13 +324,13 @@ inline ParticleEmitter& Portal(Scene& scene, Vector3 pos,
                                std::uint32_t color = COLOR_RGB(80, 255, 180))
 {
     return Emitter(scene)
-        .At(pos).Disc(0.7f).Rate(180.0f).Lifetime(0.8f, 1.4f)
+        .At(pos).Disc(0.7f).Rate(72.0f).Lifetime(0.8f, 1.4f)
         .Direction({0.0f, 1.0f, 0.0f}).Speed(4.0f, 7.0f).Spread(8.0f)
         .Gravity({0.0f, -1.0f, 0.0f}).Drag(0.3f)
         .Turbulence(1.6f, 2.6f)
         .Color(COLOR_RGBA(220, 255, 240, 220), (color & 0xffffff00u) | 140u,
                COLOR_RGBA(20, 80, 60, 0))
-        .Size(0.07f, 0.01f).Capacity(260).Unlit().Additive().Brightness(1.9f)
+        .Size(0.07f, 0.01f).Capacity(96).GpuSimulation().Unlit().Additive().Brightness(1.9f)
         .Loop()
         .Spawn();
 }

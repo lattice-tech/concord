@@ -193,6 +193,24 @@ public:
     virtual void SubmitMesh(RenderViewHandle view, const MeshDrawCommand& command) = 0;
 
     /**
+     * Queues one draw that is **outside** `view`'s camera frustum but can still
+     * cast a shadow into it.
+     *
+     * Shadow casters must not be limited to what the camera can see: a wall or
+     * prop behind or above the camera still darkens the ground in front of it.
+     * Extraction therefore culls the visible set for SubmitMesh and hands the
+     * rejected-but-still-casting draws here, so the depth-only shadow pass can
+     * include them while every visible pass ignores them.
+     *
+     * The default no-op keeps backends without a shadow pass source-compatible.
+     */
+    virtual void SubmitShadowCaster(RenderViewHandle view, const MeshDrawCommand& command)
+    {
+        (void)view;
+        (void)command;
+    }
+
+    /**
      * Queues one GPU-simulated particle emitter for `view`.
      *
      * The default no-op keeps custom backends source-compatible; backends that

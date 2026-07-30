@@ -23,8 +23,9 @@ bool GltfImporter::SupportsExtension(std::string_view ext) const
     return ext == "gltf" || ext == "glb";
 }
 
-ImportedModel GltfImporter::Import(const std::string& path)
+ImportedModel GltfImporter::Import(const std::string& path, ImportContext& context)
 {
+    (void)context;
     using namespace Gltf;
 
     ImportedModel model;

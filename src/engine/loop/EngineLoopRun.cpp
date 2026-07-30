@@ -78,6 +78,8 @@ void EngineLoop::Impl::Run()
                     bool ok = true;
                     if (request.kind == Request::Kind::Update) {
                         ok = HandleUpdate(request, backend, m_backendReady, windows);
+                    } else if (request.kind == Request::Kind::Control) {
+                        ok = HandleControl(request, windows);
                     } else {
                         const auto it = windows.find(request.id);
                         if (it != windows.end()) {
@@ -173,6 +175,7 @@ void EngineLoop::Impl::Run()
                 }
                 slot.width = newWidth;
                 slot.height = newHeight;
+                SetWindowPixelSize(id, newWidth, newHeight);
                 m_eventRouter.NotifyResized(id, newWidth, newHeight);
             }
             m_eventRouter.FlushCoalesced();
@@ -218,6 +221,12 @@ void EngineLoop::Impl::Run()
                     telemetry.taskNodeCount = snapshot->taskNodeCount;
                     telemetry.slowestTaskMs = snapshot->slowestTaskMs;
                     telemetry.slowestTask = snapshot->slowestTask;
+                    telemetry.visibilityAuthored = snapshot->visibilityAuthored;
+                    telemetry.visibilityCulled = snapshot->visibilityCulled;
+                    telemetry.visibilitySubmitted = snapshot->visibilitySubmitted;
+                    telemetry.visibilityNodesVisited = snapshot->visibilityNodesVisited;
+                    telemetry.visibilityShadowCasters = snapshot->visibilityShadowCasters;
+                    telemetry.visibilityMs = snapshot->visibilityMs;
                     hasTelemetry = true;
                 }
                 for (const RenderInstance& instance : snapshot->instances) {
@@ -236,6 +245,25 @@ void EngineLoop::Impl::Run()
                     command.bonePalette = instance.bonePalette;
                     command.boneCount = instance.boneCount;
                     backend->SubmitMesh(slot.view, command);
+                }
+                // Off-screen shadow casters take the same command form but a
+                // separate queue, so only the shadow depth pass sees them.
+                for (const RenderInstance& instance : snapshot->shadowCasters) {
+                    const MeshHandle mesh = instance.mesh.IsValid()
+                        ? instance.mesh : EnsurePrimitiveMesh(*backend, instance.shape);
+                    if (!mesh.IsValid()) {
+                        continue;
+                    }
+                    MeshDrawCommand command{};
+                    command.mesh = mesh;
+                    std::memcpy(command.worldMatrix, instance.world, sizeof(command.worldMatrix));
+                    command.material = instance.material;
+                    command.effect = instance.effect;
+                    command.rayTraced = instance.rayTraced;
+                    command.reflectionOwner = instance.reflectionOwner;
+                    command.bonePalette = instance.bonePalette;
+                    command.boneCount = instance.boneCount;
+                    backend->SubmitShadowCaster(slot.view, command);
                 }
                 for (const RenderParticleEmitter& emitter : snapshot->particleEmitters) {
                     backend->SubmitParticleEmitter(slot.view, emitter);
@@ -290,6 +318,12 @@ void EngineLoop::Impl::Run()
             stats.extractionMs = telemetry.extractionMs;
             stats.renderCollectMs = telemetry.extractionMs;
             stats.collisionMs = telemetry.collisionMs;
+            stats.visibilityAuthored = telemetry.visibilityAuthored;
+            stats.visibilityCulled = telemetry.visibilityCulled;
+            stats.visibilitySubmitted = telemetry.visibilitySubmitted;
+            stats.visibilityNodesVisited = telemetry.visibilityNodesVisited;
+            stats.visibilityShadowCasters = telemetry.visibilityShadowCasters;
+            stats.visibilityMs = telemetry.visibilityMs;
             stats.slowestTaskMs = telemetry.slowestTaskMs;
             stats.slowestTask = telemetry.slowestTask;
             stats.simulationFrame = telemetry.simulationFrame;

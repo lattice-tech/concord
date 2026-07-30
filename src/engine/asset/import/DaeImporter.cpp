@@ -93,8 +93,9 @@ bool DaeImporter::SupportsExtension(std::string_view ext) const
     return ext == "dae";
 }
 
-ImportedModel DaeImporter::Import(const std::string& path)
+ImportedModel DaeImporter::Import(const std::string& path, ImportContext& context)
 {
+    (void)context;
     ImportedModel model;
     model.name = path;
 

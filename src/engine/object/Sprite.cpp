@@ -7,6 +7,7 @@
 #include "engine/scene/Scene.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <utility>
 
@@ -59,6 +60,8 @@ Sprite::Sprite(SpriteDesc desc)
     m_frameCount = m_desc.frameCount > 0 ? m_desc.frameCount : cols * rows;
     m_frameCount = std::max(1, m_frameCount);
     m_frameMeshes.resize(static_cast<std::size_t>(m_frameCount));
+    m_frameMeshFutures.resize(static_cast<std::size_t>(m_frameCount));
+    OnStart([this] { PrewarmFrameMesh(); });
     OnUpdate([this](float dt) { Advance(dt); });
 }
 
@@ -84,6 +87,12 @@ void Sprite::Advance(float deltaTime)
         frame = m_frameCount - 1;
     }
     m_frame = frame;
+    PrewarmFrameMesh();
+}
+
+void Sprite::PrewarmFrameMesh()
+{
+    EnsureFrameMesh(m_frame);
 }
 
 MeshHandle Sprite::EnsureFrameMesh(int frame) const
@@ -98,9 +107,17 @@ MeshHandle Sprite::EnsureFrameMesh(int frame) const
     if (scene == nullptr) {
         return MeshHandle::Invalid();
     }
+    const std::size_t index = static_cast<std::size_t>(frame);
+    std::future<MeshHandle>& future = m_frameMeshFutures[index];
+    if (future.valid()) {
+        if (future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            m_frameMeshes[frame] = future.get();
+        }
+        return m_frameMeshes[frame];
+    }
     const MeshData quad = BuildFrameQuad(frame, std::max(1, m_desc.columns),
                                          std::max(1, m_desc.rows), m_desc.size);
-    m_frameMeshes[frame] = scene->AcquireMesh(quad);
+    future = scene->AcquireMeshAsync(quad);
     return m_frameMeshes[frame];
 }
 
@@ -109,7 +126,9 @@ void Sprite::CollectRender(std::vector<RenderInstance>& out) const
     if (m_desc.texture.empty()) {
         return;
     }
-    const MeshHandle mesh = EnsureFrameMesh(m_frame);
+    const MeshHandle mesh = (m_frame >= 0 && m_frame < static_cast<int>(m_frameMeshes.size()))
+        ? m_frameMeshes[static_cast<std::size_t>(m_frame)]
+        : MeshHandle::Invalid();
     if (!mesh.IsValid()) {
         return;
     }

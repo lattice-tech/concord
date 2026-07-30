@@ -6,6 +6,90 @@
 
 namespace Concord {
 
+namespace {
+
+bool PointInChromeRect(const WindowChromeRect& rect, int x, int y) noexcept
+{
+    if (rect.width <= 0.0f || rect.height <= 0.0f) {
+        return false;
+    }
+    return static_cast<float>(x) >= rect.x
+        && static_cast<float>(y) >= rect.y
+        && static_cast<float>(x) < rect.x + rect.width
+        && static_cast<float>(y) < rect.y + rect.height;
+}
+
+SDL_HitTestResult SDLCALL HitTestCallback(SDL_Window* rawWindow, const SDL_Point* area,
+                                          void* data)
+{
+    (void)rawWindow;
+    if (area == nullptr || data == nullptr) {
+        return SDL_HITTEST_NORMAL;
+    }
+    const SdlWindow* window = static_cast<const SdlWindow*>(data);
+    const WindowChromeConfig& chrome = window->Chrome();
+    if (!chrome.enabled || chrome.resizeBorder <= 0.0f) {
+        return SDL_HITTEST_NORMAL;
+    }
+
+    int width = 0;
+    int height = 0;
+    if (!window->PixelSize(width, height) || width <= 0 || height <= 0) {
+        return SDL_HITTEST_NORMAL;
+    }
+
+    const int x = area->x;
+    const int y = area->y;
+    const int border = static_cast<int>(chrome.resizeBorder);
+    const bool left = x < border;
+    const bool right = x >= width - border;
+    const bool top = y < border;
+    const bool bottom = y >= height - border;
+
+    if (top && left) return SDL_HITTEST_RESIZE_TOPLEFT;
+    if (top && right) return SDL_HITTEST_RESIZE_TOPRIGHT;
+    if (bottom && left) return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+    if (bottom && right) return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+    if (top) return SDL_HITTEST_RESIZE_TOP;
+    if (bottom) return SDL_HITTEST_RESIZE_BOTTOM;
+    if (left) return SDL_HITTEST_RESIZE_LEFT;
+    if (right) return SDL_HITTEST_RESIZE_RIGHT;
+
+    if (chrome.titleBarHeight > 0.0f
+        && y >= 0 && y < static_cast<int>(chrome.titleBarHeight)
+        && x >= static_cast<int>(chrome.captionLeftInset)
+        && x < width - static_cast<int>(chrome.captionRightInset)) {
+        const std::uint32_t excludeCount = std::min(
+            chrome.captionExcludeRectCount,
+            static_cast<std::uint32_t>(chrome.captionExcludeRects.size()));
+        for (std::uint32_t index = 0; index < excludeCount; ++index) {
+            if (PointInChromeRect(chrome.captionExcludeRects[index], x, y)) {
+                return SDL_HITTEST_NORMAL;
+            }
+        }
+        return SDL_HITTEST_DRAGGABLE;
+    }
+
+    return SDL_HITTEST_NORMAL;
+}
+
+SDL_HitTestResult ToHitTest(WindowResizeEdge edge) noexcept
+{
+    switch (edge) {
+        case WindowResizeEdge::Left: return SDL_HITTEST_RESIZE_LEFT;
+        case WindowResizeEdge::Top: return SDL_HITTEST_RESIZE_TOP;
+        case WindowResizeEdge::Right: return SDL_HITTEST_RESIZE_RIGHT;
+        case WindowResizeEdge::Bottom: return SDL_HITTEST_RESIZE_BOTTOM;
+        case WindowResizeEdge::TopLeft: return SDL_HITTEST_RESIZE_TOPLEFT;
+        case WindowResizeEdge::TopRight: return SDL_HITTEST_RESIZE_TOPRIGHT;
+        case WindowResizeEdge::BottomLeft: return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+        case WindowResizeEdge::BottomRight: return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+    }
+    return SDL_HITTEST_NORMAL;
+}
+
+} // namespace
+
 SdlWindow::~SdlWindow()
 {
     Close();
@@ -78,6 +162,17 @@ void SdlWindow::SetMode(WindowMode mode)
             SDL_SetWindowBordered(m_window, true);
             break;
     }
+
+    int pixelWidth = 0;
+    int pixelHeight = 0;
+    if (SDL_GetWindowSizeInPixels(m_window, &pixelWidth, &pixelHeight)
+        && pixelWidth > 0 && pixelHeight > 0) {
+        m_pixelWidth = pixelWidth;
+        m_pixelHeight = pixelHeight;
+        m_resized = true;
+        m_resizeWidth = pixelWidth;
+        m_resizeHeight = pixelHeight;
+    }
 }
 
 void* SdlWindow::NativeHandle() const
@@ -106,6 +201,91 @@ void SdlWindow::SetVisible(bool visible)
     } else {
         SDL_HideWindow(m_window);
     }
+}
+
+void SdlWindow::Minimize()
+{
+    if (m_window) {
+        SDL_MinimizeWindow(m_window);
+    }
+}
+
+void SdlWindow::Maximize()
+{
+    if (m_window) {
+        SDL_MaximizeWindow(m_window);
+    }
+}
+
+void SdlWindow::Restore()
+{
+    if (m_window) {
+        SDL_RestoreWindow(m_window);
+    }
+}
+
+void SdlWindow::BeginDrag(float pointerX, float pointerY)
+{
+    if (!m_window) {
+        return;
+    }
+    int windowX = 0;
+    int windowY = 0;
+    if (!SDL_GetWindowPosition(m_window, &windowX, &windowY)) {
+        return;
+    }
+    m_dragging = true;
+    m_dragAnchorX = static_cast<int>(pointerX) + windowX;
+    m_dragAnchorY = static_cast<int>(pointerY) + windowY;
+}
+
+void SdlWindow::BeginResize(WindowResizeEdge edge)
+{
+    if (!m_window) {
+        return;
+    }
+    SDL_SetWindowHitTest(m_window, nullptr, nullptr);
+    (void)ToHitTest(edge);
+    SDL_SetWindowHitTest(m_window, HitTestCallback, this);
+}
+
+void SdlWindow::SetChrome(const WindowChromeConfig& config)
+{
+    m_chrome = config;
+    if (!m_window) {
+        return;
+    }
+    SDL_SetWindowHitTest(m_window, m_chrome.enabled ? HitTestCallback : nullptr,
+                         m_chrome.enabled ? this : nullptr);
+}
+
+void SdlWindow::UpdateDrag()
+{
+    if (!m_window || !m_dragging) {
+        return;
+    }
+    float globalX = 0.0f;
+    float globalY = 0.0f;
+    const SDL_MouseButtonFlags buttons = SDL_GetGlobalMouseState(&globalX, &globalY);
+    if ((buttons & SDL_BUTTON_LMASK) == 0) {
+        m_dragging = false;
+        return;
+    }
+    const int windowX = static_cast<int>(globalX) - m_dragAnchorX;
+    const int windowY = static_cast<int>(globalY) - m_dragAnchorY;
+    SDL_SetWindowPosition(m_window, windowX, windowY);
+}
+
+bool SdlWindow::IsMinimized() const noexcept
+{
+    return m_window != nullptr
+        && (SDL_GetWindowFlags(m_window) & SDL_WINDOW_MINIMIZED) != 0;
+}
+
+bool SdlWindow::IsMaximized() const noexcept
+{
+    return m_window != nullptr
+        && (SDL_GetWindowFlags(m_window) & SDL_WINDOW_MAXIMIZED) != 0;
 }
 
 void SdlWindow::SetRelativeMouseMode(bool enabled)
@@ -200,6 +380,10 @@ void SdlWindow::HandleEvent(const SDL_Event& event)
                m_clickToRecapture && m_recaptureArmed && !m_captureRequested) {
         m_relativeMouseMode = SDL_SetWindowRelativeMouseMode(m_window, true);
         m_recaptureArmed = false;
+    } else if (event.type == SDL_EVENT_WINDOW_MINIMIZED) {
+        m_dragging = false;
+    } else if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+        m_dragging = false;
     }
 }
 

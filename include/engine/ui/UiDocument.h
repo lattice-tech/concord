@@ -14,6 +14,7 @@ enum class WidgetKind : std::uint8_t {
     Panel,  ///< Filled rectangle background.
     Label,  ///< Static text.
     Button, ///< Interactive text button (identified by id).
+    Image,  ///< Textured quad from an image file path, modulated by `color`.
 };
 
 /**
@@ -29,11 +30,19 @@ struct Widget {
     WidgetKind kind = WidgetKind::Panel;
     std::uint32_t id = 0;          ///< Button interaction id; 0 = non-interactive.
     Rect rect;
-    Color color = Rgba(255, 255, 255, 255); ///< Panel fill, or Label text color.
+    /** Panel fill, Label/Button text color, or Image tint (multiplied per channel). */
+    Color color = Rgba(255, 255, 255, 255);
     std::string text;              ///< Label / Button caption.
     Align hAlign = Align::Center;
     Align vAlign = Align::Center;
     float fontScale = 1.0f;
+    /**
+     * Image source path, relative to the working directory, for
+     * WidgetKind::Image and empty for every other kind. Kept as a separate
+     * field from `text` so an image never depends on caption semantics, and so
+     * a future textured button can carry both.
+     */
+    std::string texture;
 };
 
 /**
@@ -50,14 +59,14 @@ struct UiDocument {
     Widget& AddPanel(const Rect& rect, Color color)
     {
         return widgets.emplace_back(Widget{WidgetKind::Panel, 0, rect, color, {},
-                                           Align::Start, Align::Center, 1.0f});
+                                           Align::Start, Align::Center, 1.0f, {}});
     }
 
     /** Appends a static text label anchored at the rect (Start/Start aligns to top-left). */
     Widget& AddLabel(const Rect& rect, const std::string& text, Color color)
     {
         return widgets.emplace_back(Widget{WidgetKind::Label, 0, rect, color, text,
-                                           Align::Start, Align::Start, 1.0f});
+                                           Align::Start, Align::Start, 1.0f, {}});
     }
 
     /** Appends an interactive button with a centered caption and the given id. */
@@ -65,7 +74,23 @@ struct UiDocument {
     {
         return widgets.emplace_back(Widget{WidgetKind::Button, id, rect,
                                            Rgba(255, 255, 255, 255), text,
-                                           Align::Center, Align::Center, 1.0f});
+                                           Align::Center, Align::Center, 1.0f, {}});
+    }
+
+    /**
+     * Appends an image quad stretched to fill @p rect.
+     *
+     * @param texturePath Image file to sample; an empty path is invalid and is
+     *        rejected by the .cui format rather than drawn as a blank quad.
+     * @param tint Multiplied into the sampled color, so white keeps the image
+     *        unchanged and a lower alpha fades it.
+     */
+    Widget& AddImage(const Rect& rect, const std::string& texturePath,
+                     Color tint = Rgba(255, 255, 255, 255))
+    {
+        return widgets.emplace_back(Widget{WidgetKind::Image, 0, rect, tint, {},
+                                           Align::Center, Align::Center, 1.0f,
+                                           texturePath});
     }
 };
 

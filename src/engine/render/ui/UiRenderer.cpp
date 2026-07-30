@@ -2,11 +2,14 @@
 
 #include "engine/debug/Logger.h"
 #include "engine/render/shaders/generated/fs_debugtext.bin.h"
+#include "engine/render/shaders/generated/fs_ui_image.bin.h"
 #include "engine/render/shaders/generated/vs_debugtext.bin.h"
 
 #include <bgfx/embedded_shader.h>
 
+#include <algorithm>
 #include <cstring>
+#include <iterator>
 
 namespace {
 
@@ -22,6 +25,13 @@ const bgfx::EmbeddedShader kUiShaders[] = {
         "fs_debugtext",
         {
             BGFX_EMBEDDED_SHADER_SPIRV(bgfx::RendererType::Vulkan, fs_debugtext)
+            { bgfx::RendererType::Count, nullptr, 0 },
+        },
+    },
+    {
+        "fs_ui_image",
+        {
+            BGFX_EMBEDDED_SHADER_SPIRV(bgfx::RendererType::Vulkan, fs_ui_image)
             { bgfx::RendererType::Count, nullptr, 0 },
         },
     },
@@ -77,13 +87,23 @@ bool UiRenderer::EnsureReady()
     const bgfx::RendererType::Enum type = bgfx::getRendererType();
     const bgfx::ShaderHandle vs = bgfx::createEmbeddedShader(kUiShaders, type, "vs_debugtext");
     const bgfx::ShaderHandle fs = bgfx::createEmbeddedShader(kUiShaders, type, "fs_debugtext");
-    if (!bgfx::isValid(vs) || !bgfx::isValid(fs)) {
+    // The image path needs its own vertex shader instance: createProgram takes
+    // ownership of the shaders it destroys, so sharing one handle across two
+    // programs would double-free it.
+    const bgfx::ShaderHandle imageVs =
+        bgfx::createEmbeddedShader(kUiShaders, type, "vs_debugtext");
+    const bgfx::ShaderHandle imageFs =
+        bgfx::createEmbeddedShader(kUiShaders, type, "fs_ui_image");
+    if (!bgfx::isValid(vs) || !bgfx::isValid(fs) || !bgfx::isValid(imageVs)
+        || !bgfx::isValid(imageFs)) {
         Debug::Logger::Error("Render", "UI renderer shader creation failed");
-        if (bgfx::isValid(vs)) { bgfx::destroy(vs); }
-        if (bgfx::isValid(fs)) { bgfx::destroy(fs); }
+        for (bgfx::ShaderHandle handle : {vs, fs, imageVs, imageFs}) {
+            if (bgfx::isValid(handle)) { bgfx::destroy(handle); }
+        }
         return false;
     }
     m_program = bgfx::createProgram(vs, fs, true);
+    m_imageProgram = bgfx::createProgram(imageVs, imageFs, true);
     m_sTex = bgfx::createUniform("s_font", bgfx::UniformType::Sampler);
 
     // 1x1 opaque white, single channel: coverage 1 so solid rects render as the
@@ -99,7 +119,8 @@ bool UiRenderer::EnsureReady()
         .add(bgfx::Attrib::Color0, 4, bgfx::AttribType::Uint8, true)
         .end();
 
-    m_ready = bgfx::isValid(m_program) && bgfx::isValid(m_sTex) && bgfx::isValid(m_white);
+    m_ready = bgfx::isValid(m_program) && bgfx::isValid(m_imageProgram)
+        && bgfx::isValid(m_sTex) && bgfx::isValid(m_white);
     if (!m_ready) {
         Debug::Logger::Error("Render", "UI renderer resource init failed");
         Shutdown();
@@ -111,6 +132,10 @@ void UiRenderer::Shutdown()
 {
     if (bgfx::isValid(m_white)) { bgfx::destroy(m_white); m_white = BGFX_INVALID_HANDLE; }
     if (bgfx::isValid(m_sTex)) { bgfx::destroy(m_sTex); m_sTex = BGFX_INVALID_HANDLE; }
+    if (bgfx::isValid(m_imageProgram)) {
+        bgfx::destroy(m_imageProgram);
+        m_imageProgram = BGFX_INVALID_HANDLE;
+    }
     if (bgfx::isValid(m_program)) { bgfx::destroy(m_program); m_program = BGFX_INVALID_HANDLE; }
     m_atlas.Shutdown();
     m_ready = false;
@@ -131,6 +156,74 @@ void UiRenderer::PushQuad(std::vector<UiVertex>& out, float x0, float y0, float 
     out.push_back({nx0, ny0, 0.0f, u0, v0, abgr});
     out.push_back({nx1, ny1, 0.0f, u1, v1, abgr});
     out.push_back({nx0, ny1, 0.0f, u0, v1, abgr});
+}
+
+void UiRenderer::PushTriangle(std::vector<UiVertex>& out,
+                              float x0, float y0, float x1, float y1, float x2, float y2,
+                              std::uint32_t abgr, float w, float h)
+{
+    const float nx0 = (x0 / w) * 2.0f - 1.0f;
+    const float nx1 = (x1 / w) * 2.0f - 1.0f;
+    const float nx2 = (x2 / w) * 2.0f - 1.0f;
+    const float ny0 = 1.0f - (y0 / h) * 2.0f;
+    const float ny1 = 1.0f - (y1 / h) * 2.0f;
+    const float ny2 = 1.0f - (y2 / h) * 2.0f;
+    out.push_back({nx0, ny0, 0.0f, 0.0f, 0.0f, abgr});
+    out.push_back({nx1, ny1, 0.0f, 0.0f, 0.0f, abgr});
+    out.push_back({nx2, ny2, 0.0f, 0.0f, 0.0f, abgr});
+}
+
+void UiRenderer::PushRoundedRect(std::vector<UiVertex>& out, const UI::DrawCommand& command,
+                                 float w, float h)
+{
+    const UI::Rect& r = command.rect;
+    const float radius = std::min(command.cornerRadius,
+                                  std::min(r.width, r.height) * 0.5f);
+    if (!(radius > 0.0f)) {
+        PushQuad(out, r.x, r.y, r.x + r.width, r.y + r.height,
+                 0.0f, 0.0f, 1.0f, 1.0f, ToAbgr(command.color), w, h);
+    } else {
+        const std::uint32_t abgr = ToAbgr(command.color);
+        const float x0 = r.x;
+        const float y0 = r.y;
+        const float x1 = r.x + r.width;
+        const float y1 = r.y + r.height;
+        PushQuad(out, x0 + radius, y0, x1 - radius, y1,
+                 0.0f, 0.0f, 1.0f, 1.0f, abgr, w, h);
+        PushQuad(out, x0, y0 + radius, x0 + radius, y1 - radius,
+                 0.0f, 0.0f, 1.0f, 1.0f, abgr, w, h);
+        PushQuad(out, x1 - radius, y0 + radius, x1, y1 - radius,
+                 0.0f, 0.0f, 1.0f, 1.0f, abgr, w, h);
+
+        constexpr int segments = 8;
+        const auto corner = [&](float cx, float cy, float startAngle) {
+            for (int index = 0; index < segments; ++index) {
+                const float a0 = startAngle + (index / static_cast<float>(segments)) * 1.57079637f;
+                const float a1 = startAngle + ((index + 1) / static_cast<float>(segments)) * 1.57079637f;
+                PushTriangle(out, cx, cy,
+                             cx + std::cos(a0) * radius, cy + std::sin(a0) * radius,
+                             cx + std::cos(a1) * radius, cy + std::sin(a1) * radius,
+                             abgr, w, h);
+            }
+        };
+        corner(x0 + radius, y0 + radius, 3.14159274f);
+        corner(x1 - radius, y0 + radius, 4.71238899f);
+        corner(x1 - radius, y1 - radius, 0.0f);
+        corner(x0 + radius, y1 - radius, 1.57079637f);
+    }
+
+    if (command.borderThickness > 0.0f && (command.borderColor & 0xffu) != 0u) {
+        const std::uint32_t border = ToAbgr(command.borderColor);
+        const float t = command.borderThickness;
+        PushQuad(out, r.x, r.y, r.x + r.width, r.y + t,
+                 0.0f, 0.0f, 1.0f, 1.0f, border, w, h);
+        PushQuad(out, r.x, r.y + r.height - t, r.x + r.width, r.y + r.height,
+                 0.0f, 0.0f, 1.0f, 1.0f, border, w, h);
+        PushQuad(out, r.x, r.y + t, r.x + t, r.y + r.height - t,
+                 0.0f, 0.0f, 1.0f, 1.0f, border, w, h);
+        PushQuad(out, r.x + r.width - t, r.y + t, r.x + r.width, r.y + r.height - t,
+                 0.0f, 0.0f, 1.0f, 1.0f, border, w, h);
+    }
 }
 
 float UiRenderer::MeasureText(const std::string& text, float scale)
@@ -187,7 +280,8 @@ void UiRenderer::BuildText(std::vector<UiVertex>& out, const UI::DrawCommand& co
 }
 
 void UiRenderer::SubmitBatch(RenderViewHandle view, std::uint32_t width, std::uint32_t height,
-                             const std::vector<UiVertex>& verts, bgfx::TextureHandle texture)
+                             const std::vector<UiVertex>& verts, bgfx::TextureHandle texture,
+                             bgfx::ProgramHandle program)
 {
     if (verts.empty()) {
         return;
@@ -206,11 +300,11 @@ void UiRenderer::SubmitBatch(RenderViewHandle view, std::uint32_t width, std::ui
                    | BGFX_STATE_BLEND_ALPHA | BGFX_STATE_DEPTH_TEST_ALWAYS);
     bgfx::setTexture(0, m_sTex, texture);
     bgfx::setVertexBuffer(0, &tvb);
-    bgfx::submit(view, m_program);
+    bgfx::submit(view, program);
 }
 
 void UiRenderer::Draw(RenderViewHandle view, std::uint32_t width, std::uint32_t height,
-                      const UI::DrawList& drawList)
+                      const UI::DrawList& drawList, BgfxTextureCache* textures)
 {
     if (!m_ready || drawList.Empty() || width == 0 || height == 0
         || view == kInvalidRenderView || !bgfx::isValid(m_program)) {
@@ -221,20 +315,52 @@ void UiRenderer::Draw(RenderViewHandle view, std::uint32_t width, std::uint32_t 
 
     std::vector<UiVertex> solids;
     std::vector<UiVertex> text;
+    std::vector<ImageBatch> images;
     solids.reserve(drawList.commands.size() * 6u);
     for (const UI::DrawCommand& command : drawList.commands) {
+        const UI::Rect& r = command.rect;
         if (command.kind == UI::DrawKind::Text) {
             BuildText(text, command, w, h);
-        } else {
-            // SolidRect (TexturedRect falls back to a solid tint until Phase 3).
-            const UI::Rect& r = command.rect;
-            PushQuad(solids, r.x, r.y, r.x + r.width, r.y + r.height,
-                     0.0f, 0.0f, 1.0f, 1.0f, ToAbgr(command.color), w, h);
+            continue;
         }
+        if (command.kind == UI::DrawKind::StyledRect) {
+            PushRoundedRect(solids, command, w, h);
+            continue;
+        }
+        if (command.kind == UI::DrawKind::TexturedRect && command.texture != 0
+            && textures != nullptr) {
+            // Resolve here (render thread): a path that failed to decode drops
+            // to the solid tint below rather than sampling the single-channel
+            // white fallback through the RGBA program, which would read red.
+            const bgfx::TextureHandle handle =
+                textures->Get(static_cast<TextureId>(command.texture));
+            if (bgfx::isValid(handle)) {
+                // One batch per distinct texture, in first-use order, so image
+                // layering follows submission order like every other command.
+                auto batch = std::find_if(images.begin(), images.end(),
+                                          [&command](const ImageBatch& candidate) {
+                                              return candidate.texture == command.texture;
+                                          });
+                if (batch == images.end()) {
+                    images.push_back(ImageBatch{command.texture, handle, {}});
+                    batch = std::prev(images.end());
+                }
+                PushQuad(batch->verts, r.x, r.y, r.x + r.width, r.y + r.height,
+                         0.0f, 0.0f, 1.0f, 1.0f, ToAbgr(command.color), w, h);
+                continue;
+            }
+        }
+        // SolidRect, and any textured rect whose texture cannot be resolved:
+        // drawing the tint keeps the layout intact instead of leaving a hole.
+        PushQuad(solids, r.x, r.y, r.x + r.width, r.y + r.height,
+                 0.0f, 0.0f, 1.0f, 1.0f, ToAbgr(command.color), w, h);
     }
 
-    SubmitBatch(view, width, height, solids, m_white);
-    SubmitBatch(view, width, height, text, m_atlas.Texture());
+    SubmitBatch(view, width, height, solids, m_white, m_program);
+    for (const ImageBatch& batch : images) {
+        SubmitBatch(view, width, height, batch.verts, batch.handle, m_imageProgram);
+    }
+    SubmitBatch(view, width, height, text, m_atlas.Texture(), m_program);
 }
 
 } // namespace Concord

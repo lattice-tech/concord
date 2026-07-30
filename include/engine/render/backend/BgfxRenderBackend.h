@@ -74,6 +74,7 @@ public:
     MeshHandle CreateMesh(const MeshData& data) override;
     void DestroyMesh(MeshHandle mesh) override;
     void SubmitMesh(RenderViewHandle view, const MeshDrawCommand& command) override;
+    void SubmitShadowCaster(RenderViewHandle view, const MeshDrawCommand& command) override;
     void SubmitParticleEmitter(RenderViewHandle view,
                                const RenderParticleEmitter& emitter) override;
     void RenderView(RenderViewHandle view, const CameraView* camera,
@@ -92,9 +93,10 @@ private:
 
     // shadow + particle compute + planar + reflection cube x6 + depth prepass + lightCull + scene +
     // cloud(march+composite) + smoke(march+composite) + SMAA x3 + bloom + present
-    static constexpr std::uint32_t kViewsPerWindow =
+    static constexpr std::uint32_t kViewsPerWindow = 1 +
         kShadowCascadeCount + 4 + ReflectionCapture::kFaceCount + 1
-        + 2 + 2 + 3 + BgfxBloom::kMaxViews + 1;
+        + 2 + 2 + 3 + BgfxBloom::kMaxViews + 1
+        + 1;
 
     struct ViewSlot {
         /** The window's swap-chain framebuffer (from the native handle); the final present target. */
@@ -123,6 +125,13 @@ private:
          */
         RenderViewHandle cloudView = kInvalidRenderView;
         RenderViewHandle cloudCompositeView = kInvalidRenderView;
+
+        /**
+         * Water surfaces draw into the HDR scene target through this view,
+         * ordered after the scene view (so they composite onto resolved opaque
+         * geometry) and before the cloud/smoke passes (so their depth still
+         * occludes those). It owns no target of its own.
+         */
         bgfx::TextureHandle cloudColor = BGFX_INVALID_HANDLE;
         bgfx::FrameBufferHandle cloudFb = BGFX_INVALID_HANDLE;
         std::uint32_t cloudWidth = 0;
@@ -289,6 +298,15 @@ private:
     void RunPostProcess(RenderViewHandle view, const ViewSlot& slot, bool bloomSource,
                         const ViewEffectState* effects);
 
+    /**
+     * Writes one rendered frame to disk when CONCORD_CAPTURE_FRAME requests it.
+     *
+     * A diagnostic aid: rendering bugs that only show as "it looks wrong" are
+     * otherwise unreachable from an automated run. Disabled unless the
+     * environment variable is set, so it costs one integer compare per frame.
+     */
+    void MaybeCaptureFrame(const ViewSlot& slot);
+
     /** Draws active PrintString lines onto the window-bound present (or scene) view. */
     void DrawPrintStringOverlay(RenderViewHandle view, const ViewSlot& slot, bool postProcess);
 
@@ -313,6 +331,12 @@ private:
     SdlWindow m_deviceWindow;
     std::unordered_map<RenderViewHandle, ViewSlot> m_views;
     std::unordered_map<RenderViewHandle, std::vector<MeshDrawCommand>> m_pendingDraws;
+    /**
+     * Draws outside the camera frustum that still cast into it. Kept apart from
+     * m_pendingDraws so only the shadow depth pass ever sees them; every visible
+     * pass (scene, planar reflection, cubemap capture) stays untouched.
+     */
+    std::unordered_map<RenderViewHandle, std::vector<MeshDrawCommand>> m_pendingShadowCasters;
     std::unordered_map<RenderViewHandle,
                        std::vector<RenderParticleEmitter>> m_pendingParticleEmitters;
     RenderViewBlockAllocator m_viewBlocks;

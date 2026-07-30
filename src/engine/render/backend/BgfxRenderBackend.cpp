@@ -303,6 +303,7 @@ void BgfxRenderBackend::Shutdown() noexcept
         m_uiRenderer.Shutdown();
         m_textureCache.Clear();
         m_pendingDraws.clear();
+        m_pendingShadowCasters.clear();
         m_pendingParticleEmitters.clear();
         m_meshes.Clear();
         for (auto& [view, slot] : m_views) {

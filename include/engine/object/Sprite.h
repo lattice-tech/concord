@@ -8,6 +8,7 @@
 #include "engine/render/mesh/MeshHandle.h"
 
 #include <vector>
+#include <future>
 
 namespace Concord::Object {
 
@@ -38,6 +39,7 @@ public:
 
 private:
     void Advance(float deltaTime);
+    void PrewarmFrameMesh();
     void CollectRender(std::vector<RenderInstance>& out) const override;
     MeshHandle EnsureFrameMesh(int frame) const;
 
@@ -48,6 +50,8 @@ private:
 
     /** One lazily-uploaded quad per frame (UVs address that atlas cell). */
     mutable std::vector<MeshHandle> m_frameMeshes;
+    /** Non-blocking upload requests for frames not yet resident on the GPU. */
+    mutable std::vector<std::future<MeshHandle>> m_frameMeshFutures;
 };
 
 } // namespace Concord::Object

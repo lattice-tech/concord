@@ -4,9 +4,10 @@
 
 namespace Concord::Asset {
 
-ImportedModel ModelLoader::Import(const std::string& path)
+ImportedModel ModelLoader::Import(const std::string& path,
+                                  const ImportOptions& options)
 {
-    return ModelImporterRegistry::Instance().Import(path);
+    return ModelImporterRegistry::Instance().Import(path, options);
 }
 
 } // namespace Concord::Asset

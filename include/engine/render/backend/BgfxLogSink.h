@@ -26,8 +26,9 @@ public:
     std::uint32_t cacheReadSize(std::uint64_t) override { return 0; }
     bool cacheRead(std::uint64_t, void*, std::uint32_t) override { return false; }
     void cacheWrite(std::uint64_t, const void*, std::uint32_t) override {}
-    void screenShot(const char*, std::uint32_t, std::uint32_t, std::uint32_t, bgfx::TextureFormat::Enum,
-                    const void*, std::uint32_t, bool) override {}
+    void screenShot(const char* filePath, std::uint32_t width, std::uint32_t height,
+                    std::uint32_t pitch, bgfx::TextureFormat::Enum format,
+                    const void* data, std::uint32_t size, bool yflip) override;
     void captureBegin(std::uint32_t, std::uint32_t, std::uint32_t, bgfx::TextureFormat::Enum, bool) override {}
     void captureEnd() override {}
     void captureFrame(const void*, std::uint32_t) override {}

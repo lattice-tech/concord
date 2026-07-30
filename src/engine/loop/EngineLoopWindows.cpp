@@ -20,6 +20,8 @@ void EngineLoop::Impl::MarkWindowOpen(WindowId id, bool mouseCaptured)
         std::lock_guard<std::mutex> lock(m_openMutex);
         m_openWindows.insert(id);
         m_mouseCaptured[id] = mouseCaptured;
+        m_windowMinimized[id] = false;
+        m_windowMaximized[id] = false;
     }
     m_openCv.notify_all();
 }
@@ -30,6 +32,9 @@ void EngineLoop::Impl::MarkWindowClosed(WindowId id)
         std::lock_guard<std::mutex> lock(m_openMutex);
         m_openWindows.erase(id);
         m_mouseCaptured.erase(id);
+        m_windowMinimized.erase(id);
+        m_windowMaximized.erase(id);
+        m_windowPixelSize.erase(id);
     }
     // State publishers hold m_openMutex through their per-map write. Once the
     // membership erase above completes, no publisher can reintroduce this id.
@@ -49,6 +54,22 @@ void EngineLoop::Impl::SetMouseCaptured(WindowId id, bool mouseCaptured)
     }
 }
 
+void EngineLoop::Impl::SetWindowMinimized(WindowId id, bool minimized)
+{
+    std::lock_guard<std::mutex> lock(m_openMutex);
+    if (m_openWindows.count(id) != 0) {
+        m_windowMinimized[id] = minimized;
+    }
+}
+
+void EngineLoop::Impl::SetWindowMaximized(WindowId id, bool maximized)
+{
+    std::lock_guard<std::mutex> lock(m_openMutex);
+    if (m_openWindows.count(id) != 0) {
+        m_windowMaximized[id] = maximized;
+    }
+}
+
 bool EngineLoop::Impl::IsMouseCaptured(WindowId id) const
 {
     std::lock_guard<std::mutex> lock(m_openMutex);
@@ -56,10 +77,48 @@ bool EngineLoop::Impl::IsMouseCaptured(WindowId id) const
     return it != m_mouseCaptured.end() && it->second;
 }
 
+bool EngineLoop::Impl::IsWindowMinimized(WindowId id) const
+{
+    std::lock_guard<std::mutex> lock(m_openMutex);
+    const auto it = m_windowMinimized.find(id);
+    return it != m_windowMinimized.end() && it->second;
+}
+
+bool EngineLoop::Impl::IsWindowMaximized(WindowId id) const
+{
+    std::lock_guard<std::mutex> lock(m_openMutex);
+    const auto it = m_windowMaximized.find(id);
+    return it != m_windowMaximized.end() && it->second;
+}
+
 bool EngineLoop::Impl::IsWindowOpen(WindowId id) const
 {
     std::lock_guard<std::mutex> lock(m_openMutex);
     return m_openWindows.count(id) != 0;
+}
+
+void EngineLoop::Impl::SetWindowPixelSize(WindowId id, int width, int height)
+{
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_openMutex);
+    m_windowPixelSize[id] = {width, height};
+}
+
+bool EngineLoop::Impl::WindowPixelSize(WindowId id, int& outWidth, int& outHeight) const
+{
+    std::lock_guard<std::mutex> lock(m_openMutex);
+    if (m_openWindows.count(id) == 0) {
+        return false;
+    }
+    const auto it = m_windowPixelSize.find(id);
+    if (it == m_windowPixelSize.end()) {
+        return false;
+    }
+    outWidth = it->second.first;
+    outHeight = it->second.second;
+    return true;
 }
 
 void EngineLoop::Impl::WaitForWindowClose(WindowId id)
@@ -189,7 +248,10 @@ void EngineLoop::Impl::HandleAttach(const Request& request,
     slot.msaa = request.msaa;
     slot.aa = request.aa;
     m_eventRouter.RegisterWindow(request.id, slot.window->Handle());
+    SetWindowPixelSize(request.id, pixelWidth, pixelHeight);
     MarkWindowOpen(request.id, slot.window->IsRelativeMouseMode());
+    SetWindowMinimized(request.id, slot.window->IsMinimized());
+    SetWindowMaximized(request.id, slot.window->IsMaximized());
     request.completion->completed = true;
     request.completion->result = true;
     request.completion->done.set_value(true);
@@ -334,6 +396,44 @@ bool EngineLoop::Impl::HandleUpdate(const Request& request,
     slot.vsync = request.vsync;
     slot.msaa = request.msaa;
     slot.aa = request.aa;
+    SetWindowPixelSize(request.id, pixelWidth, pixelHeight);
+    SetWindowMinimized(request.id, slot.window->IsMinimized());
+    SetWindowMaximized(request.id, slot.window->IsMaximized());
+    return true;
+}
+
+bool EngineLoop::Impl::HandleControl(const Request& request,
+                                     std::unordered_map<WindowId, WindowSlot>& windows)
+{
+    const auto it = windows.find(request.id);
+    if (it == windows.end() || !it->second.window->IsOpen()) {
+        return false;
+    }
+
+    SdlWindow& window = *it->second.window;
+    switch (request.control) {
+        case Request::Control::Minimize:
+            window.Minimize();
+            break;
+        case Request::Control::Maximize:
+            window.Maximize();
+            break;
+        case Request::Control::Restore:
+            window.Restore();
+            break;
+        case Request::Control::BeginDrag:
+            window.BeginDrag(request.pointerX, request.pointerY);
+            break;
+        case Request::Control::BeginResize:
+            window.BeginResize(request.resizeEdge);
+            break;
+        case Request::Control::SetChrome:
+            window.SetChrome(request.chrome);
+            break;
+    }
+
+    SetWindowMinimized(request.id, window.IsMinimized());
+    SetWindowMaximized(request.id, window.IsMaximized());
     return true;
 }
 

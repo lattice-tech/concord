@@ -111,6 +111,9 @@ public:
     /** Time of the last keyframe (0 when empty). */
     float Duration() const noexcept { return m_keys.empty() ? 0.0f : m_keys.back().time; }
 
+    /** The time-sorted keyframes, for serialization and inspection. */
+    const std::vector<Keyframe<T>>& Keys() const noexcept { return m_keys; }
+
     /**
      * Value at @p time. Before the first key returns the first value; after
      * the last, the last value; between keys, the eased blend of the bracketing

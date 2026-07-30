@@ -2,14 +2,17 @@
 
 #include "engine/asset/import/ModelGeometry.h"
 #include "engine/asset/import/ModelLoader.h"
+#include "engine/collision/AabbOps.h"
 #include "engine/debug/Logger.h"
 #include "engine/material/MaterialDesc.h"
 #include "engine/render/material/CullMode.h"
 #include "engine/render/material/RenderMaterial.h"
+#include "engine/render/mesh/MeshBounds.h"
 #include "engine/render/mesh/MeshData.h"
 #include "engine/scene/Scene.h"
 
 #include <cstring>
+#include <chrono>
 #include <utility>
 
 namespace Concord::Object {
@@ -40,6 +43,28 @@ void FillInstanceWorld(RenderInstance& instance, const float* world) noexcept
     std::memcpy(instance.world, world, sizeof(instance.world));
 }
 
+/** Publishes a measured sub-mesh box so the cull path stops assuming a unit cube. */
+void FillInstanceLocalBounds(RenderInstance& instance,
+                             const Collision::Aabb& bounds) noexcept
+{
+    if (!Collision::IsValidAabb(bounds)) {
+        return;
+    }
+    instance.hasLocalBounds = true;
+    instance.localMin[0] = bounds.min.x;
+    instance.localMin[1] = bounds.min.y;
+    instance.localMin[2] = bounds.min.z;
+    instance.localMax[0] = bounds.max.x;
+    instance.localMax[1] = bounds.max.y;
+    instance.localMax[2] = bounds.max.z;
+}
+
+/** Inverted box standing for "no usable positions in this sub-mesh". */
+constexpr Collision::Aabb UnknownBounds() noexcept
+{
+    return Collision::Aabb{Vector3{1.0f, 1.0f, 1.0f}, Vector3{-1.0f, -1.0f, -1.0f}};
+}
+
 } // namespace
 
 Model::Model(ModelDesc desc)
@@ -47,6 +72,7 @@ Model::Model(ModelDesc desc)
     , m_overrideMaterial(m_desc.overrideMaterial)
 {
     SetLocalTransform(m_desc.transform);
+    OnStart([this] { PrewarmMeshes(); });
     if (m_desc.path.empty()) {
         Debug::Logger::Warn("Asset", "Model created with no path");
         return;
@@ -94,6 +120,24 @@ Model::Model(ModelDesc desc)
         m_desc.autoNormalize ? "on" : "off");
 
     m_meshes.resize(m_imported.meshes.size());
+    m_meshFutures.resize(m_imported.meshes.size());
+
+    // Measured after finalization, so the boxes match the vertices actually
+    // uploaded; the runtime never rewrites geometry again (see stage 3).
+    m_subMeshBounds.assign(m_imported.meshes.size(), UnknownBounds());
+    for (std::size_t i = 0; i < m_imported.meshes.size(); ++i) {
+        Collision::Aabb bounds{};
+        if (ComputeMeshBounds(m_imported.meshes[i].geometry, bounds)) {
+            m_subMeshBounds[i] = bounds;
+        }
+    }
+}
+
+void Model::PrewarmMeshes()
+{
+    for (std::size_t i = 0; i < m_imported.meshes.size(); ++i) {
+        EnsureMesh(i);
+    }
 }
 
 Model::~Model()
@@ -133,9 +177,15 @@ MeshHandle Model::EnsureMesh(std::size_t i) const
     if (scene == nullptr) {
         return MeshHandle::Invalid();
     }
-    const MeshHandle handle = scene->AcquireMesh(m_imported.meshes[i].geometry);
-    m_meshes[i] = handle;
-    return handle;
+    std::future<MeshHandle>& future = m_meshFutures[i];
+    if (future.valid()) {
+        if (future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            m_meshes[i] = future.get();
+        }
+        return m_meshes[i];
+    }
+    future = scene->AcquireMeshAsync(m_imported.meshes[i].geometry);
+    return MeshHandle::Invalid();
 }
 
 void Model::CollectRender(std::vector<RenderInstance>& out) const
@@ -150,12 +200,15 @@ void Model::CollectRender(std::vector<RenderInstance>& out) const
     const float* world = WorldMatrix();
     const float reflectivity = Reflectivity();
     for (std::size_t i = 0; i < m_imported.meshes.size(); ++i) {
-        const MeshHandle mesh = EnsureMesh(i);
+        const MeshHandle mesh = i < m_meshes.size() ? m_meshes[i] : MeshHandle::Invalid();
         if (!mesh.IsValid()) {
             continue;
         }
         RenderInstance instance;
         FillInstanceWorld(instance, world);
+        if (i < m_subMeshBounds.size()) {
+            FillInstanceLocalBounds(instance, m_subMeshBounds[i]);
+        }
         instance.mesh = mesh;
         if (m_overrideMaterial) {
             instance.material = ResolveMaterial(m_desc.materialOverride);

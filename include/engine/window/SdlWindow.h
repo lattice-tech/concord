@@ -2,6 +2,8 @@
 #define CONCORD_SDLWINDOW_H
 
 #include "engine/window/WindowMode.h"
+#include "engine/window/WindowChromeConfig.h"
+#include "engine/window/WindowResizeEdge.h"
 
 #include <string>
 
@@ -60,6 +62,39 @@ public:
     /** Shows or hides an already-open window; a no-op otherwise. */
     void SetVisible(bool visible);
 
+    /** Minimizes an already-open window; a no-op otherwise. */
+    void Minimize();
+
+    /** Maximizes an already-open window; a no-op otherwise. */
+    void Maximize();
+
+    /** Restores an already-open window; a no-op otherwise. */
+    void Restore();
+
+    /** Begins dragging an already-open borderless window from one client point. */
+    void BeginDrag(float pointerX, float pointerY);
+
+    /** Begins resizing an already-open borderless window from one edge. */
+    void BeginResize(WindowResizeEdge edge);
+
+    /** Enables or updates borderless title-bar and edge hit-testing. */
+    void SetChrome(const WindowChromeConfig& config);
+
+    /** Advances a custom drag, if one is active. */
+    void UpdateDrag();
+
+    /** Whether a custom drag is currently active. */
+    bool IsDragging() const noexcept { return m_dragging; }
+
+    /** Whether SDL currently reports this window minimized. */
+    bool IsMinimized() const noexcept;
+
+    /** Whether SDL currently reports this window maximized. */
+    bool IsMaximized() const noexcept;
+
+    /** Current custom borderless chrome hit-test configuration. */
+    const WindowChromeConfig& Chrome() const noexcept { return m_chrome; }
+
     /**
      * Reports and clears a pending OS resize. Returns true (with the new pixel
      * size) once per resize event; the loop uses it to rebuild the render target.
@@ -114,6 +149,10 @@ private:
     bool m_clickToRecapture = true;
     bool m_recaptureArmed = false;
     bool m_restoreCaptureOnFocus = false;
+    bool m_dragging = false;
+    int m_dragAnchorX = 0;
+    int m_dragAnchorY = 0;
+    WindowChromeConfig m_chrome;
 };
 
 } // namespace Concord

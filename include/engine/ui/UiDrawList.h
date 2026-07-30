@@ -12,6 +12,7 @@ namespace Concord::UI {
 /** What a single draw command paints. */
 enum class DrawKind : std::uint8_t {
     SolidRect,    ///< Filled rectangle (rect + color).
+    StyledRect,   ///< Filled/bordered rectangle with optional rounded corners.
     Text,         ///< Text laid out inside rect with alignment.
     TexturedRect, ///< Image quad (rect + texture + color tint); Phase 3.
 };
@@ -35,6 +36,9 @@ struct DrawCommand {
     float fontScale = 1.0f;
 
     std::uint32_t texture = 0;     ///< Engine TextureId handle; 0 = none.
+    Color borderColor = Rgba(0, 0, 0, 0);
+    float borderThickness = 0.0f;
+    float cornerRadius = 0.0f;
 };
 
 /** An ordered list of paint commands produced by one UI frame. */

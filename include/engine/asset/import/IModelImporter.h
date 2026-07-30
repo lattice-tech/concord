@@ -2,6 +2,7 @@
 #define CONCORD_IMODELIMPORTER_H
 
 #include "engine/asset/import/ImportedModel.h"
+#include "engine/asset/import/ImportContext.h"
 
 #include <string>
 #include <string_view>
@@ -34,11 +35,12 @@ public:
     virtual bool SupportsExtension(std::string_view ext) const = 0;
 
     /**
-     * Reads `path` and returns the parsed model. On any parse failure the
-     * returned model has no meshes; partial geometry is still returned so the
-     * caller sees as much as could be recovered.
+     * Reads the canonical source in @p context. Security, budget, malformed
+     * input, or allocation failures must produce an empty model; partial
+     * geometry must not cross the registry boundary.
      */
-    virtual ImportedModel Import(const std::string& path) = 0;
+    virtual ImportedModel Import(const std::string& path,
+                                 ImportContext& context) = 0;
 };
 
 } // namespace Concord::Asset

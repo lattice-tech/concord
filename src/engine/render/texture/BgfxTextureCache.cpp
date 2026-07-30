@@ -2,12 +2,14 @@
 
 #include "engine/debug/Logger.h"
 #include "engine/render/texture/TextureRegistry.h"
+#include "engine/render/texture/svg/SvgRasterizer.h"
 
 #include <bimg/bimg.h>
 #include <bimg/decode.h>
 #include <bx/allocator.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <fstream>
 #include <string>
@@ -111,6 +113,29 @@ bool ReadFile(const std::string& path, std::vector<std::uint8_t>& out)
     return static_cast<bool>(file.read(reinterpret_cast<char*>(out.data()), size));
 }
 
+bool HasSvgExtension(const std::string& path)
+{
+    if (path.size() < 4) {
+        return false;
+    }
+    const std::string ext = path.substr(path.size() - 4);
+    return std::tolower(static_cast<unsigned char>(ext[0])) == '.'
+        && std::tolower(static_cast<unsigned char>(ext[1])) == 's'
+        && std::tolower(static_cast<unsigned char>(ext[2])) == 'v'
+        && std::tolower(static_cast<unsigned char>(ext[3])) == 'g';
+}
+
+bgfx::TextureHandle LoadSvg(const std::string& path, const std::vector<std::uint8_t>& bytes)
+{
+    const std::optional<Render::Svg::RasterImage> image = Render::Svg::Rasterize(path, bytes);
+    if (!image || image->width == 0 || image->height == 0 || image->pixels.empty()) {
+        Debug::Logger::Error("Render", "texture load failed: cannot rasterize svg '%s'", path.c_str());
+        return BGFX_INVALID_HANDLE;
+    }
+    return UploadMippedRgba8(image->width, image->height, image->pixels.data(),
+                             bimg::TextureFormat::RGBA8);
+}
+
 /** Decodes and uploads `path`, or returns an invalid handle (logging why). */
 bgfx::TextureHandle Load(const std::string& path)
 {
@@ -118,6 +143,14 @@ bgfx::TextureHandle Load(const std::string& path)
     if (!ReadFile(path, bytes)) {
         Debug::Logger::Error("Render", "texture load failed: cannot read '%s'", path.c_str());
         return BGFX_INVALID_HANDLE;
+    }
+
+    if (HasSvgExtension(path)) {
+        const bgfx::TextureHandle handle = LoadSvg(path, bytes);
+        if (bgfx::isValid(handle)) {
+            Debug::Logger::Debug("Render", "loaded svg texture '%s'", path.c_str());
+        }
+        return handle;
     }
 
     bimg::ImageContainer* image = bimg::imageParse(

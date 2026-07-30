@@ -1,7 +1,9 @@
 #ifndef CONCORD_MODELLOADER_H
 #define CONCORD_MODELLOADER_H
 
+#include "Concord/CExport.h"
 #include "engine/asset/import/ImportedModel.h"
+#include "engine/asset/import/ImportContext.h"
 
 #include <string>
 
@@ -16,13 +18,14 @@ namespace Concord::Asset {
  * on the registry singleton directly, and gives a single, memorable name to
  * the "load a model" operation.
  */
-class ModelLoader {
+class CENGINE_API ModelLoader {
 public:
     /**
      * Imports `path`, dispatching by extension to the registered importer.
      * @return The parsed model; HasGeometry() is false on any failure.
      */
-    static ImportedModel Import(const std::string& path);
+    static ImportedModel Import(const std::string& path,
+                                const ImportOptions& options = {});
 };
 
 } // namespace Concord::Asset

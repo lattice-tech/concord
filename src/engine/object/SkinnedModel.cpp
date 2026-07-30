@@ -1,13 +1,16 @@
 #include "engine/object/SkinnedModel.h"
 
 #include "engine/asset/import/ModelLoader.h"
+#include "engine/collision/AabbOps.h"
 #include "engine/debug/Logger.h"
 #include "engine/render/material/CullMode.h"
 #include "engine/render/material/RenderMaterial.h"
 #include "engine/scene/Scene.h"
 
 #include <cmath>
+#include <chrono>
 #include <cstring>
+#include <thread>
 #include <utility>
 
 namespace Concord::Object {
@@ -52,20 +55,12 @@ SkinnedModel::SkinnedModel(SkinnedModelDesc desc)
     m_materialOverride = desc.materialOverride;
 
     if (!desc.path.empty()) {
-        // File path: import skeleton + skinned sub-meshes + animation clips.
-        Asset::ImportedModel imported = Asset::ModelLoader::Import(desc.path);
-        if (!imported.IsSkinned()) {
-            Debug::Logger::Warn("Asset", "SkinnedModel '%s' has no skin (not a rigged model)",
-                                desc.path.c_str());
-        } else {
-            m_skeleton = std::move(imported.skeleton);
-            m_subMeshes = std::move(imported.meshes);
-            m_ownedClips = std::move(imported.clips);
-            Debug::Logger::Info("Asset",
-                                "SkinnedModel '%s': %zu bones, %zu sub-mesh(es), %zu clip(s)",
-                                desc.path.c_str(), m_skeleton.Count(), m_subMeshes.size(),
-                                m_ownedClips.size());
-        }
+        // File path: import on a background thread so startup does not block on
+        // synchronous glTF disk IO and parsing.
+        m_pendingImportPath = desc.path;
+        m_importFuture = std::async(std::launch::async, [path = desc.path] {
+            return Asset::ModelLoader::Import(path);
+        });
     } else {
         // Procedural: a single hand-built skinned mesh.
         m_skeleton = std::move(desc.skeleton);
@@ -78,17 +73,35 @@ SkinnedModel::SkinnedModel(SkinnedModelDesc desc)
     }
 
     m_meshes.resize(m_subMeshes.size());
+    m_meshFutures.resize(m_subMeshes.size());
+
+    // Rest bounds are grouped by bone once here; every frame only re-transforms
+    // those small boxes by the palette instead of rescanning vertices.
+    m_subMeshBoneBounds.resize(m_subMeshes.size());
+    m_subMeshHasUnweighted.assign(m_subMeshes.size(), false);
+    m_poseBounds.assign(m_subMeshes.size(), Collision::Aabb{Vector3{1.0f, 1.0f, 1.0f},
+                                                            Vector3{-1.0f, -1.0f, -1.0f}});
+    for (std::size_t i = 0; i < m_subMeshes.size(); ++i) {
+        bool hasUnweighted = false;
+        ComputeSkinnedBoneBounds(m_subMeshes[i].geometry, m_subMeshBoneBounds[i],
+                                 hasUnweighted);
+        m_subMeshHasUnweighted[i] = hasUnweighted;
+    }
 
     // Seed the bind pose + palette so the mesh is drawable before a clip plays.
     m_pose = m_skeleton.BindPose();
     m_skeleton.ComputePalette(m_pose, m_palette);
+    RefreshPoseBounds();
 
     OnUpdate([this](float dt) { Advance(dt); });
 
-    // Auto-play the first imported clip so a file-loaded character animates
-    // immediately.
-    if (!m_ownedClips.empty()) {
-        PlayClip(&m_ownedClips.front(), Animation::PlaybackMode::Loop);
+    // Imported clips auto-play once the background import resolves.
+}
+
+void SkinnedModel::PrewarmMeshes()
+{
+    for (std::size_t i = 0; i < m_subMeshes.size(); ++i) {
+        EnsureMesh(i);
     }
 }
 
@@ -135,6 +148,7 @@ void SkinnedModel::Stop()
     m_time = 0.0f;
     m_pose = m_skeleton.BindPose();
     m_skeleton.ComputePalette(m_pose, m_palette);
+    RefreshPoseBounds();
 }
 
 const Animation::SkeletalClip* SkinnedModel::ClipAt(std::size_t index) const
@@ -157,6 +171,19 @@ void SkinnedModel::ApplyPose(const Animation::SkeletonPose& pose)
     m_externallyDriven = true;
     m_pose = pose;
     m_skeleton.ComputePalette(m_pose, m_palette);
+    RefreshPoseBounds();
+}
+
+void SkinnedModel::RefreshPoseBounds()
+{
+    for (std::size_t i = 0; i < m_subMeshBoneBounds.size() && i < m_poseBounds.size(); ++i) {
+        Collision::Aabb bounds{};
+        if (ComputeSkinnedPoseBounds(m_subMeshBoneBounds[i], m_palette.data(),
+                                     m_palette.size(), m_subMeshHasUnweighted[i],
+                                     bounds)) {
+            m_poseBounds[i] = bounds;
+        }
+    }
 }
 
 void SkinnedModel::Advance(float deltaTime)
@@ -172,6 +199,8 @@ void SkinnedModel::Advance(float deltaTime)
         m_pose = m_skeleton.BindPose();
     }
     m_skeleton.ComputePalette(m_pose, m_palette);
+    RefreshPoseBounds();
+    PrewarmMeshes();
 }
 
 MeshHandle SkinnedModel::EnsureMesh(std::size_t i) const
@@ -186,24 +215,96 @@ MeshHandle SkinnedModel::EnsureMesh(std::size_t i) const
     if (scene == nullptr || m_subMeshes[i].geometry.positions.empty()) {
         return MeshHandle::Invalid();
     }
-    m_meshes[i] = scene->AcquireMesh(m_subMeshes[i].geometry);
+    std::future<MeshHandle>& future = m_meshFutures[i];
+    if (future.valid()) {
+        if (future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            m_meshes[i] = future.get();
+        }
+        return m_meshes[i];
+    }
+    future = scene->AcquireMeshAsync(m_subMeshes[i].geometry);
     return m_meshes[i];
+}
+
+void SkinnedModel::PollImportedModel() const
+{
+    if (m_importResolved || !m_importFuture.valid()) {
+        return;
+    }
+    if (m_importFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        return;
+    }
+    m_importResolved = true;
+    if (!m_pendingImportPath.has_value()) {
+        m_importFuture.get();
+        return;
+    }
+    SkinnedModel* self = const_cast<SkinnedModel*>(this);
+    Asset::ImportedModel imported = m_importFuture.get();
+    const std::string path = *m_pendingImportPath;
+    if (!imported.IsSkinned()) {
+        Debug::Logger::Warn("Asset", "SkinnedModel '%s' has no skin (not a rigged model)",
+                            path.c_str());
+        m_pendingImportPath.reset();
+        return;
+    }
+
+    self->m_skeleton = std::move(imported.skeleton);
+    self->m_subMeshes = std::move(imported.meshes);
+    self->m_ownedClips = std::move(imported.clips);
+    Debug::Logger::Info("Asset",
+                        "SkinnedModel '%s': %zu bones, %zu sub-mesh(es), %zu clip(s)",
+                        path.c_str(), self->m_skeleton.Count(), self->m_subMeshes.size(),
+                        self->m_ownedClips.size());
+
+    self->m_meshes.assign(self->m_subMeshes.size(), MeshHandle::Invalid());
+    self->m_meshFutures.clear();
+    self->m_meshFutures.resize(self->m_subMeshes.size());
+    self->m_subMeshBoneBounds.resize(self->m_subMeshes.size());
+    self->m_subMeshHasUnweighted.assign(self->m_subMeshes.size(), false);
+    self->m_poseBounds.assign(self->m_subMeshes.size(), Collision::Aabb{Vector3{1.0f, 1.0f, 1.0f},
+                                                                        Vector3{-1.0f, -1.0f, -1.0f}});
+    for (std::size_t i = 0; i < self->m_subMeshes.size(); ++i) {
+        bool hasUnweighted = false;
+        ComputeSkinnedBoneBounds(self->m_subMeshes[i].geometry, self->m_subMeshBoneBounds[i],
+                                 hasUnweighted);
+        self->m_subMeshHasUnweighted[i] = hasUnweighted;
+    }
+
+    self->m_pose = self->m_skeleton.BindPose();
+    self->m_skeleton.ComputePalette(self->m_pose, self->m_palette);
+    self->RefreshPoseBounds();
+    self->PrewarmMeshes();
+    if (!self->m_ownedClips.empty()) {
+        self->PlayClip(&self->m_ownedClips.front(), Animation::PlaybackMode::Loop);
+    }
+    m_pendingImportPath.reset();
 }
 
 void SkinnedModel::CollectRender(std::vector<RenderInstance>& out) const
 {
+    PollImportedModel();
     if (m_palette.empty() || m_subMeshes.empty()) {
         return;
     }
     const float* world = WorldMatrix();
     const float reflectivity = Reflectivity();
     for (std::size_t i = 0; i < m_subMeshes.size(); ++i) {
-        const MeshHandle mesh = EnsureMesh(i);
+        const MeshHandle mesh = i < m_meshes.size() ? m_meshes[i] : MeshHandle::Invalid();
         if (!mesh.IsValid()) {
             continue;
         }
         RenderInstance instance;
         std::memcpy(instance.world, world, sizeof(instance.world));
+        if (i < m_poseBounds.size() && Collision::IsValidAabb(m_poseBounds[i])) {
+            instance.hasLocalBounds = true;
+            instance.localMin[0] = m_poseBounds[i].min.x;
+            instance.localMin[1] = m_poseBounds[i].min.y;
+            instance.localMin[2] = m_poseBounds[i].min.z;
+            instance.localMax[0] = m_poseBounds[i].max.x;
+            instance.localMax[1] = m_poseBounds[i].max.y;
+            instance.localMax[2] = m_poseBounds[i].max.z;
+        }
         instance.mesh = mesh;
         instance.material = ResolveMaterial(m_overrideMaterial ? m_materialOverride
                                                               : m_subMeshes[i].material);

@@ -16,8 +16,9 @@ bool PlyImporter::SupportsExtension(std::string_view ext) const
     return ext == "ply";
 }
 
-ImportedModel PlyImporter::Import(const std::string& path)
+ImportedModel PlyImporter::Import(const std::string& path, ImportContext& context)
 {
+    (void)context;
     ImportedModel model;
     try {
         model.name = path;

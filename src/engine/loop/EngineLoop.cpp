@@ -237,6 +237,36 @@ void EngineLoop::SetAntiAliasing(AntiAliasing aa)
     m_impl->SetAntiAliasing(aa);
 }
 
+void EngineLoop::MinimizeWindow(WindowId id)
+{
+    m_impl->MinimizeWindow(id);
+}
+
+void EngineLoop::MaximizeWindow(WindowId id)
+{
+    m_impl->MaximizeWindow(id);
+}
+
+void EngineLoop::RestoreWindow(WindowId id)
+{
+    m_impl->RestoreWindow(id);
+}
+
+void EngineLoop::BeginWindowDrag(WindowId id, float pointerX, float pointerY)
+{
+    m_impl->BeginWindowDrag(id, pointerX, pointerY);
+}
+
+void EngineLoop::BeginWindowResize(WindowId id, WindowResizeEdge edge)
+{
+    m_impl->BeginWindowResize(id, edge);
+}
+
+void EngineLoop::SetWindowChrome(WindowId id, const WindowChromeConfig& config)
+{
+    m_impl->SetWindowChrome(id, config);
+}
+
 void EngineLoop::UpdateWindow(WindowId id, const WindowDesc& desc)
 {
     m_impl->UpdateWindow(id, desc);
@@ -312,6 +342,11 @@ bool EngineLoop::IsWindowOpen(WindowId id) const
     return m_impl->IsWindowOpen(id);
 }
 
+bool EngineLoop::WindowPixelSize(WindowId id, int& outWidth, int& outHeight) const
+{
+    return m_impl->WindowPixelSize(id, outWidth, outHeight);
+}
+
 std::future<MeshHandle> EngineLoop::CreateMeshAsync(MeshData data)
 {
     return m_impl->CreateMeshAsync(std::move(data));
@@ -320,6 +355,16 @@ std::future<MeshHandle> EngineLoop::CreateMeshAsync(MeshData data)
 bool EngineLoop::IsMouseCaptured(WindowId id) const
 {
     return m_impl->IsMouseCaptured(id);
+}
+
+bool EngineLoop::IsWindowMinimized(WindowId id) const
+{
+    return m_impl->IsWindowMinimized(id);
+}
+
+bool EngineLoop::IsWindowMaximized(WindowId id) const
+{
+    return m_impl->IsWindowMaximized(id);
 }
 
 void EngineLoop::WaitForWindowClose(WindowId id)

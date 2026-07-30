@@ -22,6 +22,7 @@
 #include "engine/window/MsaaLevel.h"
 #include "engine/window/SdlWindow.h"
 #include "engine/window/WindowDesc.h"
+#include "engine/window/WindowChromeConfig.h"
 #include "engine/window/WindowMode.h"
 
 #include <atomic>
@@ -71,6 +72,12 @@ public:
     WindowId AttachWindow(const Window& window);
     void DetachWindow(WindowId id);
     void SetAntiAliasing(AntiAliasing aa);
+    void MinimizeWindow(WindowId id);
+    void MaximizeWindow(WindowId id);
+    void RestoreWindow(WindowId id);
+    void BeginWindowDrag(WindowId id, float pointerX, float pointerY);
+    void BeginWindowResize(WindowId id, WindowResizeEdge edge);
+    void SetWindowChrome(WindowId id, const WindowChromeConfig& config);
     void UpdateWindow(WindowId id, const WindowDesc& desc);
 
     UpdateId OnUpdate(std::function<void(float)> callback);
@@ -89,7 +96,10 @@ public:
     TaskGraphStats RunTaskGraph(TaskGraph graph);
 
     bool IsWindowOpen(WindowId id) const;
+    bool WindowPixelSize(WindowId id, int& outWidth, int& outHeight) const;
     bool IsMouseCaptured(WindowId id) const;
+    bool IsWindowMinimized(WindowId id) const;
+    bool IsWindowMaximized(WindowId id) const;
     void WaitForWindowClose(WindowId id);
 
     /**
@@ -137,12 +147,18 @@ private:
     };
 
     struct Request {
-        enum class Kind { Attach, Detach, Update };
+        enum class Kind { Attach, Detach, Update, Control };
+        enum class Control { Minimize, Maximize, Restore, BeginDrag, BeginResize, SetChrome };
         Kind kind = Kind::Attach;
+        Control control = Control::Minimize;
         WindowId id = kInvalidWindowId;
         std::string title;
         int width = 0;
         int height = 0;
+        float pointerX = 0.0f;
+        float pointerY = 0.0f;
+        WindowResizeEdge resizeEdge = WindowResizeEdge::Left;
+        WindowChromeConfig chrome;
         WindowMode mode = WindowMode::Windowed;
         bool resizable = true;
         bool visible = true;
@@ -215,6 +231,16 @@ private:
     void MarkWindowClosed(WindowId id);
     /** Mirrors render-thread SDL state for public thread-safe observation. */
     void SetMouseCaptured(WindowId id, bool mouseCaptured);
+    void SetWindowMinimized(WindowId id, bool minimized);
+    void SetWindowMaximized(WindowId id, bool maximized);
+
+    /**
+     * Mirrors a window's framebuffer pixel size for public thread-safe reads.
+     * Called by the render thread whenever it (re)creates or resizes a view, so
+     * simulation-side code can build a frustum with the live aspect ratio
+     * instead of guessing one.
+     */
+    void SetWindowPixelSize(WindowId id, int width, int height);
 
     /** Opens `request`'s window and registers it with the backend, if one is ready. */
     void HandleAttach(const Request& request,
@@ -243,6 +269,8 @@ private:
                       std::unique_ptr<IRenderBackend>& backend,
                       bool backendReady,
                       std::unordered_map<WindowId, WindowSlot>& windows);
+    bool HandleControl(const Request& request,
+                       std::unordered_map<WindowId, WindowSlot>& windows);
 
     std::thread m_thread;
     std::thread m_simulationThread;
@@ -300,6 +328,10 @@ private:
     std::condition_variable m_openCv;
     std::unordered_set<WindowId> m_openWindows; // ids the loop currently has open
     std::unordered_map<WindowId, bool> m_mouseCaptured;
+    std::unordered_map<WindowId, bool> m_windowMinimized;
+    std::unordered_map<WindowId, bool> m_windowMaximized;
+    /** Latest framebuffer pixel size per open window (width, height). */
+    std::unordered_map<WindowId, std::pair<int, int>> m_windowPixelSize;
 };
 
 } // namespace Concord

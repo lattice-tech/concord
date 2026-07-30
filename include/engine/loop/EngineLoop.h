@@ -13,6 +13,8 @@
 #include "engine/render/mesh/MeshHandle.h"
 #include "engine/task/TaskGraph.h"
 #include "engine/window/WindowId.h"
+#include "engine/window/WindowChromeConfig.h"
+#include "engine/window/WindowResizeEdge.h"
 
 #include <cstdint>
 #include <functional>
@@ -95,6 +97,24 @@ public:
      */
     void SetAntiAliasing(AntiAliasing aa);
 
+    /** Requests the loop to minimize `id`'s live window. */
+    void MinimizeWindow(WindowId id);
+
+    /** Requests the loop to maximize `id`'s live window. */
+    void MaximizeWindow(WindowId id);
+
+    /** Requests the loop to restore `id`'s live window. */
+    void RestoreWindow(WindowId id);
+
+    /** Requests the loop to begin dragging `id` from one client-area point. */
+    void BeginWindowDrag(WindowId id, float pointerX, float pointerY);
+
+    /** Requests the loop to begin resizing `id` from one edge or corner. */
+    void BeginWindowResize(WindowId id, WindowResizeEdge edge);
+
+    /** Applies custom borderless title-bar and edge-resize hit-test regions. */
+    void SetWindowChrome(WindowId id, const WindowChromeConfig& config);
+
     /**
      * Requests the loop to apply `desc`'s title/resolution/cursor to `id`'s
      * already-open window. Loop-thread calls enqueue and return immediately.
@@ -163,8 +183,21 @@ public:
     /** True while `id` still names a window the loop has open. Thread-safe. */
     bool IsWindowOpen(WindowId id) const;
 
+    /**
+     * Latest framebuffer pixel size for `id` (thread-safe mirror of the render
+     * thread's WindowSlot). Returns false when the window is not open or size
+     * is not yet known; out parameters are left unchanged on failure.
+     */
+    bool WindowPixelSize(WindowId id, int& outWidth, int& outHeight) const;
+
     /** True when SDL relative mouse mode is physically active for `id`. Thread-safe. */
     bool IsMouseCaptured(WindowId id) const;
+
+    /** True when SDL reports `id` minimized. Thread-safe. */
+    bool IsWindowMinimized(WindowId id) const;
+
+    /** True when SDL reports `id` maximized. Thread-safe. */
+    bool IsWindowMaximized(WindowId id) const;
 
     /**
      * Blocks the calling thread until `id`'s window closes — whether the user

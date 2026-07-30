@@ -1,5 +1,7 @@
 #include "engine/ui/UiContext.h"
 
+#include "engine/render/texture/TextureRegistry.h"
+
 #include <algorithm>
 #include <cmath>
 #include <iterator>
@@ -46,12 +48,54 @@ void Context::EmitSolidRect(const Rect& rect, Color color)
     m_drawList.commands.push_back(std::move(command));
 }
 
+void Context::EmitStyledRect(const Rect& rect, Color fill, Color borderColor,
+                             float borderThickness, float cornerRadius)
+{
+    DrawCommand command;
+    command.kind = DrawKind::StyledRect;
+    command.rect = rect;
+    command.color = fill;
+    command.borderColor = borderColor;
+    command.borderThickness = borderThickness;
+    command.cornerRadius = cornerRadius;
+    m_drawList.commands.push_back(std::move(command));
+}
+
 void Context::Panel(const Rect& rect, Color color)
 {
     EmitSolidRect(rect, color);
     if (m_input.pointerValid && rect.Contains(m_input.pointerX, m_input.pointerY)) {
         m_wantsPointer = true;
     }
+}
+
+void Context::Panel(const Rect& rect, Color fill, Color borderColor,
+                    float borderThickness, float cornerRadius)
+{
+    EmitStyledRect(rect, fill, borderColor, borderThickness, cornerRadius);
+    if (m_input.pointerValid && rect.Contains(m_input.pointerX, m_input.pointerY)) {
+        m_wantsPointer = true;
+    }
+}
+
+void Context::EmitTexturedRect(const Rect& rect, std::uint32_t texture, Color tint)
+{
+    DrawCommand command;
+    command.kind = DrawKind::TexturedRect;
+    command.rect = rect;
+    command.color = tint;
+    command.texture = texture;
+    m_drawList.commands.push_back(std::move(command));
+}
+
+void Context::Image(const Rect& rect, const std::string& texturePath, Color tint)
+{
+    if (texturePath.empty()) {
+        return;
+    }
+    EmitTexturedRect(rect,
+                     static_cast<std::uint32_t>(TextureRegistry::Acquire(texturePath)),
+                     tint);
 }
 
 void Context::EmitText(const Rect& rect, const std::string& text, Color color,
@@ -191,6 +235,9 @@ void Context::Present(const UiDocument& document, float width, float height,
             break;
         case WidgetKind::Button:
             (void)Button(widget.id, widget.rect, widget.text);
+            break;
+        case WidgetKind::Image:
+            Image(widget.rect, widget.texture, widget.color);
             break;
         }
     }

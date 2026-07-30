@@ -56,9 +56,13 @@ bool BgfxRenderBackend::CreateFramebufferForView(RenderViewHandle view, const Re
         slot.reflectionViews = existing->second.reflectionViews;
         slot.reflectionForwardPlus = existing->second.reflectionForwardPlus;
         slot.particleComputeView = existing->second.particleComputeView;
+        slot.fluidComputeView = existing->second.fluidComputeView;
         slot.depthPrepassView = existing->second.depthPrepassView;
         slot.lightCullView = existing->second.lightCullView;
         slot.mainForwardPlus = existing->second.mainForwardPlus;
+        slot.waterView = existing->second.waterView;
+        slot.fluidSurfaceView = existing->second.fluidSurfaceView;
+        slot.waterBakeView = existing->second.waterBakeView;
         slot.cloudView = existing->second.cloudView;
         slot.cloudCompositeView = existing->second.cloudCompositeView;
         slot.smokeView = existing->second.smokeView;
@@ -192,12 +196,18 @@ RenderViewHandle BgfxRenderBackend::CreateView(const RenderViewInit& init)
     // sample. Allocated unconditionally: a window with no shadow-casting light
     // still benefits from a stable view slot, and ensures the scene pass always
     // has shadow inputs bound (disabled or not) rather than left unset.
+    // The wave cascade bake comes first of all: shadows, the planar reflection
+    // and the scene all have to agree on the shape of the water this frame.
+    const RenderViewHandle waterBakeViewId = static_cast<RenderViewHandle>(nextView++);
     std::array<RenderViewHandle, kShadowCascadeCount> shadowViews{};
     for (RenderViewHandle& shadowView : shadowViews) {
         shadowView = static_cast<RenderViewHandle>(nextView++);
     }
     // Particle simulation must precede every view that reads its state buffer.
     const RenderViewHandle particleComputeViewId = static_cast<RenderViewHandle>(nextView++);
+    // DFSPH fluid simulation and surface reconstruction likewise run on their
+    // own view: mixing compute dispatches into the scene view corrupts the
+    // backend's pass state on Vulkan.
     // planar (mirrored scene) → six-face reflection capture → scene
     const RenderViewHandle planarViewId = static_cast<RenderViewHandle>(nextView++);
     std::array<RenderViewHandle, ReflectionCapture::kFaceCount> reflectionViews{};
@@ -392,9 +402,10 @@ void BgfxRenderBackend::DestroyView(RenderViewHandle view)
     DestroyForwardPlusContexts(it->second);
     m_gpuParticles.DestroyView(view);
     m_smaa.Release(view);
-    m_viewBlocks.Release(it->second.shadowViews[0]);
+    m_viewBlocks.Release(view - (1 + kShadowCascadeCount + 4 + ReflectionCapture::kFaceCount + 1));
     m_views.erase(it);
     m_pendingDraws.erase(view);
+    m_pendingShadowCasters.erase(view);
     m_pendingParticleEmitters.erase(view);
 }
 
@@ -407,6 +418,7 @@ void BgfxRenderBackend::DestroyViewTargets(ViewSlot& slot)
         slot.cloudFb = BGFX_INVALID_HANDLE;
     }
     slot.cloudColor = BGFX_INVALID_HANDLE;
+
     // The smoke framebuffer owns both attachments (destroyTextures=true).
     if (bgfx::isValid(slot.smokeFb)) {
         bgfx::destroy(slot.smokeFb);

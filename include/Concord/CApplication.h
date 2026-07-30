@@ -16,6 +16,8 @@
 #include "engine/window/Resolution.h"
 #include "engine/window/Window.h"
 #include "engine/window/WindowDesc.h"
+#include "engine/window/WindowChromeConfig.h"
 #include "engine/window/WindowId.h"
+#include "engine/window/WindowResizeEdge.h"
 
 #endif // CONCORD_CAPPLICATION_H

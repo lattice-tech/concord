@@ -69,6 +69,16 @@ struct RenderInstance {
      */
     const float* bonePalette = nullptr;
     std::uint32_t boneCount = 0;
+
+    /**
+     * Model-space AABB for frustum culling. When hasLocalBounds is false the
+     * cull path treats the draw as the unit cube [-1,1]^3 (built-in primitives
+     * after size is baked into `world`). Imported models set true and fill
+     * localMin/localMax from MeshData positions.
+     */
+    bool hasLocalBounds = false;
+    float localMin[3]{0.0f, 0.0f, 0.0f};
+    float localMax[3]{0.0f, 0.0f, 0.0f};
 };
 
 } // namespace Concord

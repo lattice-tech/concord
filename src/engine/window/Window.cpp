@@ -21,11 +21,25 @@ const std::string& Window::Title() const noexcept
 
 int Window::Width() const noexcept
 {
+    if (const std::shared_ptr<EngineLoop> loop = m_loop.lock()) {
+        int width = 0;
+        int height = 0;
+        if (loop->WindowPixelSize(m_windowId, width, height)) {
+            return width;
+        }
+    }
     return m_desc.resolution.width;
 }
 
 int Window::Height() const noexcept
 {
+    if (const std::shared_ptr<EngineLoop> loop = m_loop.lock()) {
+        int width = 0;
+        int height = 0;
+        if (loop->WindowPixelSize(m_windowId, width, height)) {
+            return height;
+        }
+    }
     return m_desc.resolution.height;
 }
 
@@ -77,6 +91,22 @@ AntiAliasing Window::Antialiasing() const noexcept
     return m_desc.antialiasing;
 }
 
+bool Window::IsMinimized() const noexcept
+{
+    if (const std::shared_ptr<EngineLoop> loop = m_loop.lock()) {
+        return loop->IsWindowMinimized(m_windowId);
+    }
+    return false;
+}
+
+bool Window::IsMaximized() const noexcept
+{
+    if (const std::shared_ptr<EngineLoop> loop = m_loop.lock()) {
+        return loop->IsWindowMaximized(m_windowId);
+    }
+    return false;
+}
+
 void Window::Set(WindowDesc desc)
 {
     m_desc = std::move(desc);
@@ -90,6 +120,13 @@ void Window::SetAntialiasing(AntiAliasing aa)
     WindowDesc desc = m_desc;
     desc.antialiasing = aa;
     Set(desc);
+}
+
+void Window::SetMode(WindowMode mode)
+{
+    WindowDesc desc = m_desc;
+    desc.mode = mode;
+    Set(std::move(desc));
 }
 
 void Window::SetVisible(bool visible)
@@ -118,6 +155,48 @@ void Window::SetClickToRecapture(bool clickToRecapture)
     WindowDesc desc = m_desc;
     desc.clickToRecapture = clickToRecapture;
     Set(std::move(desc));
+}
+
+void Window::Minimize()
+{
+    if (const std::shared_ptr<EngineLoop> loop = m_loop.lock()) {
+        loop->MinimizeWindow(m_windowId);
+    }
+}
+
+void Window::Maximize()
+{
+    if (const std::shared_ptr<EngineLoop> loop = m_loop.lock()) {
+        loop->MaximizeWindow(m_windowId);
+    }
+}
+
+void Window::Restore()
+{
+    if (const std::shared_ptr<EngineLoop> loop = m_loop.lock()) {
+        loop->RestoreWindow(m_windowId);
+    }
+}
+
+void Window::BeginDrag(float pointerX, float pointerY)
+{
+    if (const std::shared_ptr<EngineLoop> loop = m_loop.lock()) {
+        loop->BeginWindowDrag(m_windowId, pointerX, pointerY);
+    }
+}
+
+void Window::RequestClose()
+{
+    if (const std::shared_ptr<EngineLoop> loop = m_loop.lock()) {
+        loop->DetachWindow(m_windowId);
+    }
+}
+
+void Window::SetChrome(WindowChromeConfig config)
+{
+    if (const std::shared_ptr<EngineLoop> loop = m_loop.lock()) {
+        loop->SetWindowChrome(m_windowId, config);
+    }
 }
 
 void Window::BindLive(std::weak_ptr<EngineLoop> loop, EngineLoop::WindowId id)

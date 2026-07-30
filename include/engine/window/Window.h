@@ -4,7 +4,9 @@
 #include "Concord/CExport.h"
 #include "engine/loop/EngineLoop.h"
 #include "engine/window/WindowDesc.h"
+#include "engine/window/WindowChromeConfig.h"
 #include "engine/window/WindowId.h"
+#include "engine/window/WindowResizeEdge.h"
 
 #include <memory>
 #include <string>
@@ -55,6 +57,12 @@ public:
     /** The full-scene anti-aliasing technique this window currently uses. */
     AntiAliasing Antialiasing() const noexcept;
 
+    /** Whether the live OS window is currently minimized. */
+    bool IsMinimized() const noexcept;
+
+    /** Whether the live OS window is currently maximized. */
+    bool IsMaximized() const noexcept;
+
     /**
      * Replaces this window's description wholesale (see WindowDesc) and,
      * if currently attached, pushes the change to the live OS window;
@@ -70,6 +78,9 @@ public:
      */
     void SetAntialiasing(AntiAliasing aa);
 
+    /** Convenience: changes only the presentation mode and pushes it live. */
+    void SetMode(WindowMode mode);
+
     /** Convenience: shows or hides the attached OS window. */
     void SetVisible(bool visible);
 
@@ -81,6 +92,27 @@ public:
 
     /** Convenience: enables or disables click-to-recapture for this window. */
     void SetClickToRecapture(bool clickToRecapture);
+
+    /** Requests the attached OS window to minimize. */
+    void Minimize();
+
+    /** Requests the attached OS window to maximize. */
+    void Maximize();
+
+    /** Requests the attached OS window to restore from min/max state. */
+    void Restore();
+
+    /** Starts dragging a borderless OS window from one client-area point. */
+    void BeginDrag(float pointerX, float pointerY);
+
+    /** Starts resizing a borderless OS window from one edge or corner. */
+    void BeginResize(WindowResizeEdge edge);
+
+    /** Requests the attached OS window to close. */
+    void RequestClose();
+
+    /** Configures custom title-bar drag and border hit-testing for a borderless window. */
+    void SetChrome(WindowChromeConfig config);
 
     /**
      * Process-unique id assigned when this window is attached, or

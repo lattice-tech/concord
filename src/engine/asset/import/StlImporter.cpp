@@ -210,8 +210,9 @@ bool StlImporter::SupportsExtension(std::string_view ext) const
     return ext == "stl";
 }
 
-ImportedModel StlImporter::Import(const std::string& path)
+ImportedModel StlImporter::Import(const std::string& path, ImportContext& context)
 {
+    (void)context;
     ImportedModel model;
     model.name = path;
 

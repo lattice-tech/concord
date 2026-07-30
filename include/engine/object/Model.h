@@ -3,12 +3,14 @@
 
 #include "Concord/CExport.h"
 #include "engine/asset/import/ImportedModel.h"
+#include "engine/collision/Aabb.h"
 #include "engine/object/ModelDesc.h"
 #include "engine/object/Node.h"
 #include "engine/render/frame/RenderInstance.h"
 #include "engine/render/mesh/MeshHandle.h"
 
 #include <vector>
+#include <future>
 
 namespace Concord::Object {
 
@@ -58,6 +60,7 @@ public:
     bool HasMaterialOverride() const noexcept { return m_overrideMaterial; }
 
 private:
+    void PrewarmMeshes();
     void CollectRender(std::vector<RenderInstance>& out) const override;
 
     /** Uploads sub-mesh `i` to the GPU on first use; returns its handle. */
@@ -69,6 +72,15 @@ private:
 
     /** One lazy-uploaded GPU mesh per imported sub-mesh; invalid until first use. */
     mutable std::vector<MeshHandle> m_meshes;
+    /** Non-blocking GPU upload futures for sub-meshes not resident yet. */
+    mutable std::vector<std::future<MeshHandle>> m_meshFutures;
+
+    /**
+     * Model-space AABB per sub-mesh, measured once after the geometry is
+     * finalized. An entry left inverted (see Collision::IsValidAabb) means the
+     * sub-mesh had no usable positions, and culling falls back to the unit cube.
+     */
+    std::vector<Collision::Aabb> m_subMeshBounds;
 };
 
 } // namespace Concord::Object

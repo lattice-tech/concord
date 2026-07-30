@@ -74,6 +74,136 @@ void EngineLoop::Impl::SetAntiAliasing(AntiAliasing aa)
     m_antiAliasing.store(aa, std::memory_order_relaxed);
 }
 
+void EngineLoop::Impl::MinimizeWindow(WindowId id)
+{
+    if (id == kInvalidWindowId) {
+        return;
+    }
+    Request request;
+    request.kind = Request::Kind::Control;
+    request.control = Request::Control::Minimize;
+    request.id = id;
+    if (IsLoopThread()) {
+        Enqueue(std::move(request));
+        return;
+    }
+    std::future<bool> future = request.completion->done.get_future();
+    const std::shared_ptr<RequestCompletion> completion = request.completion;
+    if (!Enqueue(std::move(request))) {
+        CompleteRequest(completion, false);
+    }
+    WaitForRequest(completion, future);
+}
+
+void EngineLoop::Impl::MaximizeWindow(WindowId id)
+{
+    if (id == kInvalidWindowId) {
+        return;
+    }
+    Request request;
+    request.kind = Request::Kind::Control;
+    request.control = Request::Control::Maximize;
+    request.id = id;
+    if (IsLoopThread()) {
+        Enqueue(std::move(request));
+        return;
+    }
+    std::future<bool> future = request.completion->done.get_future();
+    const std::shared_ptr<RequestCompletion> completion = request.completion;
+    if (!Enqueue(std::move(request))) {
+        CompleteRequest(completion, false);
+    }
+    WaitForRequest(completion, future);
+}
+
+void EngineLoop::Impl::RestoreWindow(WindowId id)
+{
+    if (id == kInvalidWindowId) {
+        return;
+    }
+    Request request;
+    request.kind = Request::Kind::Control;
+    request.control = Request::Control::Restore;
+    request.id = id;
+    if (IsLoopThread()) {
+        Enqueue(std::move(request));
+        return;
+    }
+    std::future<bool> future = request.completion->done.get_future();
+    const std::shared_ptr<RequestCompletion> completion = request.completion;
+    if (!Enqueue(std::move(request))) {
+        CompleteRequest(completion, false);
+    }
+    WaitForRequest(completion, future);
+}
+
+void EngineLoop::Impl::BeginWindowDrag(WindowId id, float pointerX, float pointerY)
+{
+    if (id == kInvalidWindowId) {
+        return;
+    }
+    Request request;
+    request.kind = Request::Kind::Control;
+    request.control = Request::Control::BeginDrag;
+    request.id = id;
+    request.pointerX = pointerX;
+    request.pointerY = pointerY;
+    if (IsLoopThread()) {
+        Enqueue(std::move(request));
+        return;
+    }
+    std::future<bool> future = request.completion->done.get_future();
+    const std::shared_ptr<RequestCompletion> completion = request.completion;
+    if (!Enqueue(std::move(request))) {
+        CompleteRequest(completion, false);
+    }
+    WaitForRequest(completion, future);
+}
+
+void EngineLoop::Impl::BeginWindowResize(WindowId id, WindowResizeEdge edge)
+{
+    if (id == kInvalidWindowId) {
+        return;
+    }
+    Request request;
+    request.kind = Request::Kind::Control;
+    request.control = Request::Control::BeginResize;
+    request.id = id;
+    request.resizeEdge = edge;
+    if (IsLoopThread()) {
+        Enqueue(std::move(request));
+        return;
+    }
+    std::future<bool> future = request.completion->done.get_future();
+    const std::shared_ptr<RequestCompletion> completion = request.completion;
+    if (!Enqueue(std::move(request))) {
+        CompleteRequest(completion, false);
+    }
+    WaitForRequest(completion, future);
+}
+
+void EngineLoop::Impl::SetWindowChrome(WindowId id, const WindowChromeConfig& config)
+{
+    if (id == kInvalidWindowId) {
+        return;
+    }
+    Request request;
+    request.kind = Request::Kind::Control;
+    request.control = Request::Control::SetChrome;
+    request.id = id;
+    request.chrome = config;
+    if (IsLoopThread()) {
+        Enqueue(std::move(request));
+        return;
+    }
+    std::future<bool> future = request.completion->done.get_future();
+    const std::shared_ptr<RequestCompletion> completion = request.completion;
+    if (!Enqueue(std::move(request))) {
+        CompleteRequest(completion, false);
+    }
+    WaitForRequest(completion, future);
+}
+
 void EngineLoop::Impl::UpdateWindow(WindowId id, const WindowDesc& desc)
 {
     if (id == kInvalidWindowId) {

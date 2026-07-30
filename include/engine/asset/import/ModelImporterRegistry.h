@@ -2,6 +2,7 @@
 #define CONCORD_MODELIMPORTERREGISTRY_H
 
 #include "engine/asset/import/ImportedModel.h"
+#include "engine/asset/import/ImportContext.h"
 
 #include <memory>
 #include <string>
@@ -34,7 +35,8 @@ public:
      * runs it. Returns an empty model when no importer matches or the import
      * fails, so callers always get a well-formed result to check.
      */
-    ImportedModel Import(const std::string& path);
+    ImportedModel Import(const std::string& path,
+                         const ImportOptions& options = {});
 
 private:
     ModelImporterRegistry();

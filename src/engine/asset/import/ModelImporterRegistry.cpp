@@ -8,6 +8,8 @@
 #include "engine/asset/import/StlImporter.h"
 #include "engine/asset/import/ThreeDsImporter.h"
 #include "engine/asset/import/ImportPaths.h"
+#include "engine/asset/import/ImportFileReader.h"
+#include "engine/asset/import/ImportModelValidator.h"
 #include "engine/debug/Logger.h"
 
 #include <algorithm>
@@ -60,7 +62,8 @@ void ModelImporterRegistry::Register(std::unique_ptr<IModelImporter> importer)
     }
 }
 
-ImportedModel ModelImporterRegistry::Import(const std::string& path)
+ImportedModel ModelImporterRegistry::Import(const std::string& path,
+                                            const ImportOptions& options)
 {
     m_impl->EnsureSeeded();
     const std::string ext = Paths::Extension(path);
@@ -79,7 +82,38 @@ ImportedModel ModelImporterRegistry::Import(const std::string& path)
         }
     }
     if (selected != nullptr) {
-        ImportedModel model = selected->Import(path);
+        const auto sandbox = ImportPathSandbox::Create(path, options.allowedRoot);
+        if (!sandbox) {
+            Debug::Logger::Warn("Asset", "import source is outside the allowed root or not a file: '%s'",
+                                path.c_str());
+            return {};
+        }
+        ImportContext context{ImportBudget(options.limits), *sandbox};
+        if (!ValidatePrimaryFile(context)) {
+            Debug::Logger::Warn("Asset", "import source exceeds its byte budget: '%s'",
+                                path.c_str());
+            return {};
+        }
+        ImportedModel model;
+        try {
+            model = selected->Import(sandbox->SourcePath().string(), context);
+        } catch (const std::bad_alloc&) {
+            Debug::Logger::Error("Asset", "import allocation failed for '%s'", path.c_str());
+            return {};
+        } catch (const std::exception& exception) {
+            Debug::Logger::Error("Asset", "import failed for '%s' (%s)",
+                                 path.c_str(), exception.what());
+            return {};
+        } catch (...) {
+            Debug::Logger::Error("Asset", "import failed for '%s'", path.c_str());
+            return {};
+        }
+        if (model.HasGeometry()
+            && !ValidateImportedModel(model, context.Budget())) {
+            Debug::Logger::Warn("Asset", "imported geometry exceeds budget or is malformed: '%s'",
+                                path.c_str());
+            return {};
+        }
         if (!model.HasGeometry()) {
             Debug::Logger::Warn("Asset", "importer produced no geometry from '%s'", path.c_str());
         } else {

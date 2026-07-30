@@ -116,6 +116,26 @@ constexpr float kBloomFilterRadius = 1.0f;
 
 namespace Concord {
 
+void BgfxRenderBackend::MaybeCaptureFrame(const ViewSlot& slot)
+{
+    // Opt-in frame grab for looking at what the renderer actually produced
+    // without a person at the window: CONCORD_CAPTURE_FRAME=<n> writes the n-th
+    // rendered frame of a window to CONCORD_CAPTURE_PATH (default capture.tga).
+    static const long captureFrame = [] {
+        const char* value = std::getenv("CONCORD_CAPTURE_FRAME");
+        return value != nullptr ? std::strtol(value, nullptr, 10) : 0L;
+    }();
+    if (captureFrame <= 0 || !bgfx::isValid(slot.framebuffer)) {
+        return;
+    }
+    static long frameIndex = 0;
+    if (++frameIndex != captureFrame) {
+        return;
+    }
+    const char* path = std::getenv("CONCORD_CAPTURE_PATH");
+    bgfx::requestScreenShot(slot.framebuffer, path != nullptr ? path : "capture.tga");
+}
+
 void BgfxRenderBackend::RunPostProcess(RenderViewHandle view, const ViewSlot& slot,
                                        bool bloomSource, const ViewEffectState* effects)
 {
@@ -155,7 +175,7 @@ void BgfxRenderBackend::RunPostProcess(RenderViewHandle view, const ViewSlot& sl
                               AntiAliasing::Fxaa, bloomTex, bloomIntensity, effects);
         return;
     }
-    // Off / MSAA*: HDR offscreen → dithered blit (no FXAA blur). Hardware MSAA
+    // Off / MSAA*: HDR offscreen �?dithered blit (no FXAA blur). Hardware MSAA
     // on the swap chain is not used when the HDR present path is active; the
     // anti-banding present is more important for flat-lit surfaces.
     m_postProcess.Blit(slot.presentView, slot.scene.color, slot.width, slot.height,
@@ -188,6 +208,19 @@ void BgfxRenderBackend::SubmitMesh(RenderViewHandle view, const MeshDrawCommand&
     m_pendingDraws[view].push_back(command);
 }
 
+void BgfxRenderBackend::SubmitShadowCaster(RenderViewHandle view,
+                                           const MeshDrawCommand& command)
+{
+    if (!m_initialized || view == kInvalidRenderView
+        || command.material.blend != Material::BlendMode::Opaque
+        || command.effect == RenderEffect::ParticleBillboard) {
+        return;
+    }
+    // Depth-only path: no material program is needed, but the skinned shadow
+    // program still has to be ready before the pass submits.
+    m_pendingShadowCasters[view].push_back(command);
+}
+
 void BgfxRenderBackend::SubmitParticleEmitter(
     RenderViewHandle view, const RenderParticleEmitter& emitter)
 {
@@ -216,7 +249,6 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     const auto particleIt = m_pendingParticleEmitters.find(view);
     const bool hasGpuParticles = particleIt != m_pendingParticleEmitters.end()
         && !particleIt->second.empty();
-
     // Offscreen HDR scene + present blit (dither to 8-bit). Used for every AA
     // mode when the RT came up; not limited to FXAA/SMAA.
     const bool postProcess = slot.scene.Valid() && slot.presentView != kInvalidRenderView;
@@ -227,7 +259,7 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     // camera, or fall back to the engine's default framing when none is set.
     // Computed BEFORE the shadow pass so the shadow frustum can be tightened
     // to the camera frustum (the single biggest quality lever for shadow
-    // sharpness — without this the shadow map would waste texels covering the
+    // sharpness �?without this the shadow map would waste texels covering the
     // 40×40 ground plane the camera can't even see all of).
     float viewMtx[16];
     Projection projection = Projection::Perspective;
@@ -302,10 +334,15 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
         m_gpuParticles.Simulate(
             view, slot.particleComputeView, particleIt->second);
     }
-
     if (!hasDraws) {
         if (pendingIt != m_pendingDraws.end()) {
             pendingIt->second.clear();
+        }
+        // Nothing visible receives a shadow this frame, so the casters queued
+        // for it are dropped rather than carried into the next frame.
+        if (const auto casterIt = m_pendingShadowCasters.find(view);
+            casterIt != m_pendingShadowCasters.end()) {
+            casterIt->second.clear();
         }
         bool particleBloomSource = false;
         if (hasGpuParticles) {
@@ -366,7 +403,7 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     PlanarReflection::Plane plane;
     const MeshDrawCommand* planarReceiver = nullptr;
     for (const MeshDrawCommand& cmd : pendingIt->second) {
-        if (!cmd.material.planarReflection) {
+        if (plane.valid || !cmd.material.planarReflection) {
             continue;
         }
         plane.point[0] = cmd.worldMatrix[12];
@@ -427,7 +464,7 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
                 MeshHandle meshHandle = cmd.mesh;
                 if (!meshHandle.IsValid()) {
                     // Primitive path uses shape; batcher already resolved meshes
-                    // into handles for custom meshes only — skip unresolved.
+                    // into handles for custom meshes only �?skip unresolved.
                     continue;
                 }
                 const BgfxMeshStore::BgfxMesh* mesh = m_meshes.Get(meshHandle);
@@ -761,6 +798,8 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
         m_gpuParticles.Draw(view, view, particleIt->second);
     }
 
+    // Water composites onto the resolved opaque scene and writes depth, so the
+    // cloud and smoke passes that follow are still occluded by the surface.
     // Volumetric clouds composite into the HDR scene color, truncated by scene
     // depth, before bloom and the tone-mapped present.
     if (postProcess) {
@@ -775,8 +814,13 @@ void BgfxRenderBackend::RenderView(RenderViewHandle view, const CameraView* came
     }
 
     DrawPrintStringOverlay(view, slot, postProcess);
+    MaybeCaptureFrame(slot);
 
     pendingIt->second.clear();
+    if (const auto casterIt = m_pendingShadowCasters.find(view);
+        casterIt != m_pendingShadowCasters.end()) {
+        casterIt->second.clear();
+    }
     if (hasGpuParticles) {
         particleIt->second.clear();
     }
@@ -945,7 +989,7 @@ void BgfxRenderBackend::DrawPrintStringOverlay(RenderViewHandle view, const View
     // Game UI (panels/labels/buttons) draws first, so the developer HUD and
     // PrintString notifications below stay legible on top of it.
     if (!uiList.Empty() && m_uiRenderer.EnsureReady()) {
-        m_uiRenderer.Draw(overlayView, slot.width, slot.height, uiList);
+        m_uiRenderer.Draw(overlayView, slot.width, slot.height, uiList, &m_textureCache);
     }
 
     // PrintString and the debug HUD need the text overlay; if there is nothing

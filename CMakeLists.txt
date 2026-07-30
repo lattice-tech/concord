@@ -68,6 +68,23 @@ set_target_properties(bgfx PROPERTIES
 # bgfx Windows 渲染后端所需系统库
 target_link_libraries(bgfx INTERFACE gdi32 user32 uuid)
 
+# Pure cook/id/serialization core shared by CEngine, concord-cook, and tests.
+# Lives outside the per-DLL GLOB so the offline cooker does not link CEngine/bgfx.
+set(CONCORD_ASSET_CORE_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/id/AssetContentHash.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/id/AssetId.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/AssetDependencyGraph.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookManifest.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookPlanner.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookCatalog.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookSession.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookIo.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/serialization/BinaryReader.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/serialization/BinaryWriter.cpp)
+add_library(ConcordAssetCore STATIC ${CONCORD_ASSET_CORE_SOURCES})
+target_include_directories(ConcordAssetCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+set_target_properties(ConcordAssetCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # 引擎模块 -> 独立 DLL
 #   concord_add_module(<DLL名> DIR <src子目录> [LINK <依赖库...>] [PCH <头文件...>])
 #   约定: 模块源码在 src/<DIR>/, 公共头在 include/Concord/
@@ -88,6 +105,10 @@ endfunction()
 function(concord_add_module NAME)
     cmake_parse_arguments(ARG "" "DIR" "LINK;PCH" ${ARGN})
     file(GLOB_RECURSE _srcs CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/${ARG_DIR}/*.cpp)
+    if(ARG_DIR STREQUAL "engine")
+        # Asset core is compiled once into ConcordAssetCore and linked below.
+        list(REMOVE_ITEM _srcs ${CONCORD_ASSET_CORE_SOURCES})
+    endif()
     if(NOT _srcs)
         message(STATUS "concord: 模块 ${NAME} 无源码, 跳过")
         return()
@@ -108,6 +129,9 @@ function(concord_add_module NAME)
     if(ARG_LINK)
         target_link_libraries(${NAME} PRIVATE ${ARG_LINK})
     endif()
+    if(ARG_DIR STREQUAL "engine")
+        target_link_libraries(${NAME} PRIVATE ConcordAssetCore)
+    endif()
     if(ARG_PCH)
         target_precompile_headers(${NAME} PRIVATE ${ARG_PCH})
     endif()
@@ -120,10 +144,15 @@ find_package(Threads REQUIRED)
 # 注意: bgfx 为静态库, 只允许链入 CEngine 一个 DLL,
 # 其他模块需要渲染时通过 CEngine 暴露的接口访问, 避免多份 bgfx 全局状态
 concord_add_module(CEngine DIR engine LINK bgfx SDL3::SDL3 Threads::Threads shell32 PCH <bgfx/bgfx.h> <SDL3/SDL.h>)
-concord_add_module(CAudio  DIR audio  LINK Phonon::Phonon)
-concord_add_module(CGUI    DIR gui)
+concord_add_module(CAudio  DIR audio  LINK Phonon::Phonon SDL3::SDL3 Threads::Threads)
+concord_add_module(CGUI    DIR gui LINK CEngine)
 concord_add_module(CTime   DIR time   LINK Threads::Threads)
 concord_add_module(CSystem DIR system LINK SDL3::SDL3)
+
+# Offline incremental cooker: links only ConcordAssetCore (no bgfx / CEngine).
+add_executable(concord-cook tools/cook/main.cpp)
+target_link_libraries(concord-cook PRIVATE ConcordAssetCore)
+concord_set_runtime_output(concord-cook "${CMAKE_CURRENT_BINARY_DIR}/tools")
 
 if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionTests.cpp")
     add_library(ConcordEventTypeIdentityProbe SHARED
@@ -146,6 +175,62 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
             tests/InputActionsRegressionTests.cpp
             tests/UiRegressionTests.cpp
             tests/SceneIoGoldenTests.cpp
+            tests/sceneIo/SceneIoTestSupport.cpp
+            tests/sceneIo/SceneIoV6Tests.cpp
+            tests/sceneIo/SceneIoPayloadRoundTripTests.cpp
+            tests/sceneIo/SceneIoV7RoundTripTests.cpp
+            tests/sceneIo/SceneIoV7ValidationTests.cpp
+            tests/SceneLifecycleRegressionTests.cpp
+            tests/assetImport/ImportBudgetTests.cpp
+            tests/assetImport/ImportPathSandboxTests.cpp
+            tests/assetCook/AssetIdentityTests.cpp
+            tests/assetCook/CookManifestTests.cpp
+            tests/assetCook/CookedMeshTests.cpp
+            tests/assetCook/CookedMaterialTests.cpp
+            tests/assetCook/CookedRigTests.cpp
+            tests/assetCook/CookedTextureTests.cpp
+            tests/assetCook/CookedAudioTests.cpp
+            tests/assetCook/CookedUiDocumentTests.cpp
+            tests/assetCook/CookedSceneTests.cpp
+            tests/assetCook/CookedPrefabTests.cpp
+            tests/assetCook/CookPlannerTests.cpp
+            tests/assetCook/CookSessionTests.cpp
+            tests/spatial/SpatialTreeTests.cpp
+            tests/spatial/BroadphasePairsTests.cpp
+            tests/spatial/PersistentBroadphaseTests.cpp
+            tests/spatial/InstanceCullTests.cpp
+            tests/spatial/CameraFrustumTests.cpp
+            src/engine/spatial/DynamicAabbTree.cpp
+            src/engine/spatial/DynamicAabbTreeBalance.cpp
+            src/engine/spatial/DynamicAabbTreeQueries.cpp
+            src/engine/spatial/Frustum.cpp
+            src/engine/spatial/FrustumCuller.cpp
+            src/engine/spatial/InstanceCuller.cpp
+            src/engine/spatial/ShadowCasterCuller.cpp
+            src/engine/render/mesh/MeshBounds.cpp
+            src/engine/render/mesh/SkinnedMeshBounds.cpp
+            # Water CPU math is exported from CEngine.dll (CENGINE_API), so the
+            # tests link it from there rather than re-compiling the sources into
+            # the test executable, which would clash with the DLL's exports.
+            src/engine/collision/query/RayIntersection.cpp
+            src/engine/asset/import/ImportBudget.cpp
+            src/engine/asset/import/ImportPathSandbox.cpp
+            src/engine/asset/import/ImportModelValidator.cpp
+            src/engine/asset/cook/CookedMesh.cpp
+            src/engine/asset/cook/CookedMaterial.cpp
+            src/engine/asset/cook/CookedSkeleton.cpp
+            src/engine/asset/cook/CookedAnimationClip.cpp
+            src/engine/asset/cook/CookedTexture.cpp
+            src/engine/asset/cook/CookedAudioClip.cpp
+            src/engine/asset/cook/CookedUiDocument.cpp
+            src/engine/asset/cook/CookedScene.cpp
+            src/engine/asset/cook/CookedPrefab.cpp
+            src/engine/asset/cook/CookedSceneCodec.cpp
+            src/engine/asset/cook/CookedSceneEnvironment.cpp
+            src/engine/asset/cook/CookedSceneGraph.cpp
+            src/engine/asset/cook/CookedSceneObjectPayload.cpp
+            src/engine/asset/cook/CookedScenePayload.cpp
+            src/engine/asset/cook/CookedSceneParticle.cpp
             src/engine/asset/import/PlyImporter.cpp
             src/engine/asset/import/gltf/GltfBufferReader.cpp
             src/engine/asset/import/gltf/GltfImageResolver.cpp
@@ -156,18 +241,20 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
             src/engine/render/batch/RenderBatcher.cpp
             src/engine/render/lighting/ClusteredLightCuller.cpp
             src/engine/render/mesh/Primitives.cpp
-             src/engine/render/reflection/ReflectionReceiverSelector.cpp
-             src/engine/render/reflection/PlanarReflectionCamera.cpp
-             src/engine/render/shadow/ShadowFrustum.cpp
-             src/engine/render/frame/WorldSnapshot.cpp
-             src/engine/task/JobSystem.cpp
-             src/engine/task/TaskGraph.cpp)
+            src/engine/render/reflection/ReflectionReceiverSelector.cpp
+            src/engine/render/reflection/PlanarReflectionCamera.cpp
+            src/engine/render/shadow/ShadowFrustum.cpp
+            src/engine/render/frame/WorldSnapshot.cpp
+            src/engine/task/JobSystem.cpp
+            src/engine/task/TaskGraph.cpp)
     target_include_directories(ConcordEngineRegressionTests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/tests
             ${CONCORD_3RD_DIR})
+    # ConcordAssetCore supplies id/cook-core/serialization; cooked format codecs
+    # and importers remain test-local TUs (they depend on mesh/material types).
     target_link_libraries(ConcordEngineRegressionTests PRIVATE
-            CEngine bx SDL3::SDL3 Threads::Threads)
+            ConcordAssetCore CEngine bx SDL3::SDL3 Threads::Threads)
     add_dependencies(ConcordEngineRegressionTests ConcordEventTypeIdentityProbe)
     concord_set_runtime_output(
             ConcordEngineRegressionTests "${CMAKE_CURRENT_BINARY_DIR}/tests")

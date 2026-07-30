@@ -82,11 +82,18 @@ void BgfxRenderBackend::RenderShadowPass(RenderViewHandle view, ViewSlot& slot,
         return;
     }
 
+    // Off-screen casters (see SubmitShadowCaster): geometry the camera cannot
+    // see but whose shadow still lands inside the view.
+    const auto casterIt = m_pendingShadowCasters.find(view);
+    const std::vector<MeshDrawCommand>* offscreenCasters =
+        casterIt != m_pendingShadowCasters.end() && !casterIt->second.empty()
+            ? &casterIt->second : nullptr;
+
     const RenderLight& light = lights[caster];
     std::copy_n(light.direction, 3, out.lightDir);
     out.casterIndex = caster;
 
-    const bool hasOpaqueCaster = std::any_of(
+    const bool hasOpaqueCaster = offscreenCasters != nullptr || std::any_of(
         pendingIt->second.begin(), pendingIt->second.end(), [](const MeshDrawCommand& command) {
             return command.material.blend == Material::BlendMode::Opaque;
         });
@@ -150,15 +157,21 @@ void BgfxRenderBackend::RenderShadowPass(RenderViewHandle view, ViewSlot& slot,
 
     m_batcher.BeginFrame();
     m_skinnedScratch.clear();
-    for (const MeshDrawCommand& command : pendingIt->second) {
-        if (command.material.blend != Material::BlendMode::Opaque) {
-            continue;
+    const auto collectCasters = [this](const std::vector<MeshDrawCommand>& commands) {
+        for (const MeshDrawCommand& command : commands) {
+            if (command.material.blend != Material::BlendMode::Opaque) {
+                continue;
+            }
+            if (command.bonePalette != nullptr && command.boneCount > 0) {
+                m_skinnedScratch.push_back(&command);
+            } else {
+                m_batcher.Add(command);
+            }
         }
-        if (command.bonePalette != nullptr && command.boneCount > 0) {
-            m_skinnedScratch.push_back(&command);
-        } else {
-            m_batcher.Add(command);
-        }
+    };
+    collectCasters(pendingIt->second);
+    if (offscreenCasters != nullptr) {
+        collectCasters(*offscreenCasters);
     }
     m_batcher.Finish();
 

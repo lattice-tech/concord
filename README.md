@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English (default)</a> | <a href="README.zh.md">简体中文</a>
+  <a href="README.md">English</a> | <a href="README.zh.md">简体中文</a>
 </p>
 
 <p align="center">
@@ -81,7 +81,7 @@ int main()
 |---|---|---|
 | Animation | `CAnimation.h` | Animation clips, blending, skeletons, and state machines |
 | Application | `CApplication.h` | Game lifecycle, windows, and application configuration |
-| Audio | `CAudio.h` | Steam Audio HRTF spatialization |
+| Audio | `CAudio.h` | Runtime stereo audio facade and Steam Audio HRTF spatialization |
 | Camera | `CCamera.h` | Camera nodes and descriptors |
 | Character | `CCharacter.h` | Character controller and configuration |
 | Collision | `CCollision.h` | Collision shapes, colliders, and AABBs |
