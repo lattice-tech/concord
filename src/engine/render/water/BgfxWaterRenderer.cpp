@@ -142,6 +142,10 @@ bool BgfxWaterRenderer::EnsureReady()
     m_sPlanar = bgfx::createUniform("s_waterPlanar", bgfx::UniformType::Sampler);
     m_uCascadeParams = bgfx::createUniform("u_waterCascadeParams",
                                            bgfx::UniformType::Vec4, WaterCascade::kLevels);
+    m_uWaveA = bgfx::createUniform("u_waterWaveA", bgfx::UniformType::Vec4,
+                                   Water::kMaxWaterWaves);
+    m_uWaveB = bgfx::createUniform("u_waterWaveB", bgfx::UniformType::Vec4,
+                                   Water::kMaxWaterWaves);
     m_uTile = bgfx::createUniform("u_waterTile", bgfx::UniformType::Vec4);
     m_sCascade = bgfx::createUniform("s_waterCascade", bgfx::UniformType::Sampler);
 
@@ -156,6 +160,7 @@ bool BgfxWaterRenderer::EnsureReady()
         && bgfx::isValid(m_sSceneDepth) && bgfx::isValid(m_uPlanarViewProj)
         && bgfx::isValid(m_uPlanarParams) && bgfx::isValid(m_sPlanar)
         && bgfx::isValid(m_uCascadeParams) && bgfx::isValid(m_uTile)
+        && bgfx::isValid(m_uWaveA) && bgfx::isValid(m_uWaveB)
         && bgfx::isValid(m_sCascade) && m_cascade.EnsureReady()
         && m_clipmap.EnsureReady() && m_grids.EnsureReady();
     if (!m_ready) {
@@ -175,7 +180,7 @@ void BgfxWaterRenderer::DestroyResources()
                                        &m_sSceneColor, &m_sSceneDepth,
                                        &m_uPlanarViewProj, &m_uPlanarParams,
                                        &m_sPlanar, &m_uCascadeParams, &m_uTile,
-                                       &m_sCascade}) {
+                                       &m_sCascade, &m_uWaveA, &m_uWaveB}) {
         if (bgfx::isValid(*handle)) {
             bgfx::destroy(*handle);
             *handle = BGFX_INVALID_HANDLE;
@@ -201,13 +206,37 @@ void BgfxWaterRenderer::ApplySurface(const RenderWaterSurface& surface,
                                      const SkyEnvironment& environment,
                                      const DrawParams& params)
 {
-    // The wave field itself lives in the cascade now (see WaterCascade); the
-    // shaders only need the surface clock, the level count and the plane height.
+    // The vertex stage sums the CPU-resolved Gerstner octaves, so the drawn
+    // surface and buoyancy queries agree; y carries the active wave count.
+    const std::uint32_t waveCount =
+        std::min(surface.waves.count, Water::kMaxWaterWaves);
     const float surfaceParams[4] = {
-        surface.state.time, static_cast<float>(WaterCascade::kLevels),
+        surface.state.time, static_cast<float>(waveCount),
         surface.motion == Water::WaterMotion::Still ? 0.0f : 1.0f,
         surface.world[13]};
     bgfx::setUniform(m_uSurface, surfaceParams);
+
+    float waveA[Water::kMaxWaterWaves][4]{};
+    float waveB[Water::kMaxWaterWaves][4]{};
+    for (std::uint32_t index = 0; index < waveCount; ++index) {
+        const Water::GerstnerWave& wave = surface.waves.waves[index];
+        const float wavelength = std::max(wave.wavelength, 1e-3f);
+        const float k = 6.2831853f / wavelength;
+        // Normalised horizontal sharpness: at 1 the summed crests still cannot
+        // fold the surface over itself (same rule the CPU sampler applies).
+        const float q = wave.amplitude > 1e-5f && waveCount > 0
+            ? std::clamp(wave.steepness, 0.0f, 1.0f)
+                / (k * wave.amplitude * static_cast<float>(waveCount))
+            : 0.0f;
+        waveA[index][0] = wave.directionX;
+        waveA[index][1] = wave.directionZ;
+        waveA[index][2] = wave.amplitude;
+        waveA[index][3] = wavelength;
+        waveB[index][0] = wave.speed;
+        waveB[index][1] = q;
+    }
+    bgfx::setUniform(m_uWaveA, waveA, Water::kMaxWaterWaves);
+    bgfx::setUniform(m_uWaveB, waveB, Water::kMaxWaterWaves);
     bgfx::setUniform(m_uCascadeParams, m_cascade.LevelParams(), WaterCascade::kLevels);
     const float flow[4] = {surface.state.flowOffsetX, surface.state.flowOffsetZ,
                            surface.flowVelocity[0], surface.flowVelocity[1]};
@@ -226,7 +255,7 @@ void BgfxWaterRenderer::ApplySurface(const RenderWaterSurface& surface,
     deep[3] = surface.depth;
     bgfx::setUniform(m_uDeep, deep);
 
-    const float optics[4] = {surface.roughness, surface.foamWidth,
+    const float optics[4] = {std::max(surface.roughness, 0.01f), surface.foamWidth,
                              surface.foamIntensity,
                              surface.kind == Water::WaterKind::River ? 1.0f
                              : (surface.kind == Water::WaterKind::Ocean ? 2.0f : 0.0f)};
@@ -334,14 +363,6 @@ void BgfxWaterRenderer::Draw(const DrawParams& params, const SkyEnvironment& env
 
     for (std::uint32_t index = 0; index < drawn; ++index) {
         const RenderWaterSurface& surface = surfaces[index];
-        // The cascade bake view is still touched first so its lower view id
-        // orders correctly before this draw; the three.js-style shader does
-        // not consume the atlas, but keeping the bake alive preserves the
-        // existing view-id ordering and lets a future path sample it again.
-        if (index == 0) {
-            m_cascade.Update(params.bakeView, surface, params.eye[0], params.eye[2]);
-        }
-
         // one flat plane per surface, transformed by the surface's real world
         // matrix plus a width/length scale. Using the full matrix keeps the
         // plane aligned with the authored node transform instead of assuming an

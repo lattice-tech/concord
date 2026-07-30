@@ -120,6 +120,9 @@ private:
     bgfx::UniformHandle m_sPlanar = BGFX_INVALID_HANDLE;
     /** Per-level cascade mapping and the per-tile placement, for the vertex stage. */
     bgfx::UniformHandle m_uCascadeParams = BGFX_INVALID_HANDLE;
+    /** Per-octave Gerstner data for the vertex stage: A = dir/amp/λ, B = speed/Q. */
+    bgfx::UniformHandle m_uWaveA = BGFX_INVALID_HANDLE;
+    bgfx::UniformHandle m_uWaveB = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle m_uTile = BGFX_INVALID_HANDLE;
     bgfx::UniformHandle m_sCascade = BGFX_INVALID_HANDLE;
     WaterCascade m_cascade;

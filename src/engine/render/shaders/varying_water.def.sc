@@ -9,3 +9,4 @@ vec3 v_wpos    : TEXCOORD0;
 vec2 v_uv      : TEXCOORD1;
 vec4 v_surface : TEXCOORD2;
 vec4 v_cascade : TEXCOORD3;
+vec4 v_wave    : TEXCOORD4;
