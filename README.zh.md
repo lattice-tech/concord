@@ -121,10 +121,6 @@ int main()
 
 暂无。
 
-<br>
-
-[![Star History Chart](https://api.star-history.com/svg?repos=lattice-tech/concord&type=Date)](https://star-history.com/#lattice-tech/concord&Date)
-
 ## 贡献流程
 
 见 [CONTRIBUTING.md](.github/CONTRIBUTING.md)。
