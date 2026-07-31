@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability, please **do not** report it through public Issues.
 
-Send vulnerability details to latticegames@mail.com (Mainland China: latticegames@163.com). We will acknowledge receipt within 48 hours and provide an initial assessment within 7 days.
+Send vulnerability details to latticegames@163.com. We will acknowledge receipt within 48 hours and provide an initial assessment within 7 days.
 
 We ask that you:
 
