@@ -1,38 +1,38 @@
-# 贡献流程
+# Contribution Process
 
-## 开始前
+## Before You Start
 
-先确认问题的边界：它影响的是公开 API、引擎内部实现、构建脚本，还是示例与文档。涉及多个部分时，先说明依赖关系和预期行为，避免把不相关的整理混入同一次改动。
+Clarify the scope of the issue: does it affect the public API, engine internals, build scripts, or examples and documentation? When a change spans multiple areas, describe the dependencies and expected behavior first. Do not bundle unrelated changes into a single patch.
 
-## 注释与提交语言
+## Comment and Commit Language
 
-代码注释、文档、提交标题和提交正文仅允许使用以下语言：
+Comments, documentation, commit subjects, and commit bodies may be written in:
 
-- 简体中文
-- 繁体中文
-- 英文
+- Simplified Chinese
+- Traditional Chinese
+- English
 
-术语、类型名、路径、命令和外部 API 名称可以按其原有写法保留。不要用无法稳定显示或无法被团队成员阅读的混合编码文本。
+Terminology, type names, paths, commands, and external API names may be kept in their original form. Do not use mixed-encoding text that cannot be consistently displayed or read by team members.
 
-## 实现
+## Implementation
 
-1. 在独立分支中完成改动。不要修改与当前目标无关的文件。
-2. 新增公开能力时，先确定入口头文件、所属模块和生命周期；实现细节留在对应的内部目录。
-3. 修改线程、渲染、资源或序列化逻辑时，明确所有权、调用线程、失败行为和兼容性影响。
-4. 注释只解释约束、决策或不直观的行为。能由代码直接表达的内容不需要重复说明。
+1. Make changes on a dedicated branch. Do not modify files unrelated to the current goal.
+2. When adding public capabilities, determine the entry header, module, and lifecycle first; keep implementation details under the corresponding internal directory.
+3. When modifying threading, rendering, resource, or serialization logic, clarify ownership, calling thread, failure behavior, and compatibility impact.
+4. Comments should only explain constraints, decisions, or non-obvious behavior. Do not restate what the code already expresses.
 
-## 验证
+## Verification
 
-提交前至少完成与改动范围相符的验证：
+Before committing, complete verification appropriate to the scope of the change:
 
-1. 构建受影响的目标。
-2. 运行相关测试；没有测试时，记录手动验证的场景和结果。
-3. 检查新增或变更的公开接口、配置项、资源格式和文档是否一致。
-4. 确认日志中没有新增的错误、警告或断言失败。
+1. Build the affected targets.
+2. Run relevant tests; if no tests exist, document the manual verification scenarios and results.
+3. Check that new or changed public interfaces, configuration items, resource formats, and documentation are consistent.
+4. Confirm no new errors, warnings, or assertion failures appear in logs.
 
-## 提交与评审
+## Commit and Review
 
-1. 按可独立理解和验证的功能拆分提交。
-2. 提交标题说明行为变化；提交正文说明原因、兼容性影响和验证结果。
-3. 评审说明应列出改动范围、已验证内容和仍需关注的风险。
-4. 收到反馈后，更新实现、测试或说明，并保持提交历史可读。
+1. Split work into commits that can be understood and verified independently.
+2. Commit subjects describe behavioral changes; commit bodies explain the rationale, compatibility impact, and verification results.
+3. Review descriptions should list the scope of changes, verified items, and remaining risks.
+4. After receiving feedback, update the implementation, tests, or description while keeping the commit history readable.
