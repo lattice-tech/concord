@@ -91,19 +91,24 @@ int main()
 | 环境变量 | `CEnv.h` | 全局环境值 |
 | 环境 | `CEnvironment.h` | 天空、天气、昼夜和环境设置 |
 | 事件 | `CEvents.h` | 类型化事件和窗口输入事件 |
+| 流体 | `CFluid.h` | DFSPH 流体与 Marching-Cubes 表面重建 |
+| GUI | `CGUI.h` | GUI 视窗边框与标题列样式 |
 | 输入 | `CInput.h` | 键盘、鼠标和输入动作 |
+| 交互 | `CInteraction.h` | UI 感知指针交互与射线反馈 |
 | 光照 | `CLight.h` | 灯光和太阳光节点 |
 | 材质 | `CMaterial.h` | 材质模型、表面和纹理 |
 | 数学 | `CMath.h` | 向量、矩阵、四元数和欧拉角 |
 | 运动 | `CMotion.h` | 缓动和节点运动 |
 | 物体 | `CObject.h` | 可渲染场景节点和图元 |
 | 粒子 | `CParticles.h` | 粒子发射器、力场和爆发 |
+| 存档 | `CSave.h` | 场景存档系统与归档序列化 |
 | 场景 | `CScene.h` | 场景所有权和序列化 |
 | 烟雾 | `CSmoke.h` | 局部体积烟雾节点 |
 | 系统 | `CSystem.h` | 硬件和平台信息 |
 | 时间 | `CTime.h` | 时间和帧计数器 |
 | UI | `CUI.h` | 即时模式 UI 和 UI 文档 |
 | 工具 | `CUtils.h` | 打印和平台工具 |
+| 水体 | `CWater.h` | 水体与波浪模拟 |
 
 ## 赞助
 

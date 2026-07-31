@@ -92,6 +92,8 @@ int main()
 | Environment Variables | `CEnv.h` | Global environment values |
 | Environment | `CEnvironment.h` | Sky, weather, day-night, and environment settings |
 | Events | `CEvents.h` | Typed events and window input events |
+| Fluid | `CFluid.h` | DFSPH fluid bodies with Marching-Cubes surface reconstruction |
+| GUI | `CGUI.h` | GUI window chrome and title bar styling |
 | Input | `CInput.h` | Keyboard, mouse, and input actions |
 | Interaction | `CInteraction.h` | UI-aware pointer interaction and raycast feedback |
 | Lighting | `CLight.h` | Light and sunlight nodes |
@@ -100,12 +102,14 @@ int main()
 | Motion | `CMotion.h` | Easing and node motion |
 | Objects | `CObject.h` | Renderable scene nodes and primitives |
 | Particles | `CParticles.h` | Particle emitters, force fields, and bursts |
+| Save | `CSave.h` | Scene save/load system with archive serialization |
 | Scene | `CScene.h` | Scene ownership and serialization |
 | Smoke | `CSmoke.h` | Local volumetric smoke nodes |
 | System | `CSystem.h` | Hardware and platform information |
 | Time | `CTime.h` | Time and frame counters |
 | UI | `CUI.h` | Immediate-mode UI and UI documents |
 | Utilities | `CUtils.h` | Printing and platform utilities |
+| Water | `CWater.h` | Water bodies with wave simulation |
 
 ## Sponsorship
 
