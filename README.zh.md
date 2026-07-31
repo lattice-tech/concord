@@ -15,7 +15,7 @@
 
 # Concord Engine
 
-Concord 是面向实时 3D 应用的 Windows C++23 引擎。公开 API 覆盖渲染、场景、输入、资产和运行时服务。
+Concord 是一款面向 Windows 的 C++23 实时 3D 引擎。公开 API 覆盖渲染、场景、输入、资产和运行时服务。
 
 > [!WARNING]
 > Concord 仍处于早期开发阶段。API、项目文件格式和运行时行为可能发生不兼容变更，构建版本也可能不稳定。
@@ -81,6 +81,7 @@ int main()
 |---|---|---|
 | 动画 | `CAnimation.h` | 动画片段、混合、骨骼和状态机 |
 | 应用 | `CApplication.h` | 游戏生命周期、窗口和应用配置 |
+| 音频 | `CAudio.h` | 音频播放、总线、效果链、合成器与 Steam Audio HRTF 空间化 |
 | 摄像机 | `CCamera.h` | 摄像机节点和描述符 |
 | 角色 | `CCharacter.h` | 角色控制器和配置 |
 | 碰撞 | `CCollision.h` | 碰撞形状、碰撞器和 AABB |

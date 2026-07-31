@@ -15,7 +15,7 @@
 
 # Concord Engine
 
-Concord is a Windows-focused C++23 engine for real-time 3D applications. Its public API covers rendering, scenes, input, assets, and runtime services.
+Concord is a C++23 real-time 3D engine for Windows. Its public API covers rendering, scenes, input, assets, and runtime services.
 
 > [!WARNING]
 > Concord is in early development. APIs, project file formats, and runtime behavior may change without compatibility guarantees, and builds may be unstable.
@@ -81,7 +81,7 @@ int main()
 |---|---|---|
 | Animation | `CAnimation.h` | Animation clips, blending, skeletons, and state machines |
 | Application | `CApplication.h` | Game lifecycle, windows, and application configuration |
-| Audio | `CAudio.h` | Runtime stereo audio facade and Steam Audio HRTF spatialization |
+| Audio | `CAudio.h` | Audio playback, buses, effect chains, synth, and Steam Audio HRTF spatialization |
 | Camera | `CCamera.h` | Camera nodes and descriptors |
 | Character | `CCharacter.h` | Character controller and configuration |
 | Collision | `CCollision.h` | Collision shapes, colliders, and AABBs |
