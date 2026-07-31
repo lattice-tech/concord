@@ -128,7 +128,7 @@ int main()
 <br>
 
 <p align="center">
-  <img src="assets/Lattice.jpg" alt="Lattice Games" width="64">
+  <img src="assets/Lattice.png" alt="Lattice Games" width="64">
   <br>
   <sub>由 Lattice Games 开发</sub>
 </p>

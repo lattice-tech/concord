@@ -128,7 +128,7 @@ See [CONTRIBUTING.md](.github/CONTRIBUTING.md).
 <br>
 
 <p align="center">
-  <img src="assets/Lattice.jpg" alt="Lattice Games" width="64">
+  <img src="assets/Lattice.png" alt="Lattice Games" width="64">
   <br>
   <sub>Developed by Lattice Games</sub>
 </p>
