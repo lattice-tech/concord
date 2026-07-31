@@ -124,3 +124,11 @@ int main()
 ## 貢獻流程
 
 見 [CONTRIBUTING.md](.github/CONTRIBUTING.md)。
+
+<br>
+
+<p align="center">
+  <img src="assets/Lattice.jpg" alt="Lattice Games" width="64">
+  <br>
+  <sub>由 Lattice Games 開發</sub>
+</p>
