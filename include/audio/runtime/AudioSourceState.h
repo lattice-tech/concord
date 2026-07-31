@@ -28,6 +28,7 @@ struct AudioSourceState {
     float innerConeDegrees = 360.0f;
     float outerConeDegrees = 360.0f;
     float outerConeGain = 1.0f;
+    float occlusion = 0.0f;
     AudioAttenuationModel attenuation = AudioAttenuationModel::Linear;
 };
 

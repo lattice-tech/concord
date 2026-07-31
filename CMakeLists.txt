@@ -79,11 +79,33 @@ set(CONCORD_ASSET_CORE_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookCatalog.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookSession.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookIo.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookedMesh.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookedMaterial.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookedModel.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookedTexture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/TextureMipChain.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/TextureCookProducer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/serialization/BinaryReader.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/serialization/BinaryWriter.cpp)
 add_library(ConcordAssetCore STATIC ${CONCORD_ASSET_CORE_SOURCES})
 target_include_directories(ConcordAssetCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_target_properties(ConcordAssetCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# CPU-only model importers shared by CEngine (via its own compilation of the
+# same sources) and concord-cook, so the cooker can bake real CookedModel
+# blobs without linking bgfx or CEngine.dll. Compiled with CONCORD_STATIC_LINK
+# so CENGINE_API collapses to nothing inside the static archive.
+file(GLOB_RECURSE CONCORD_IMPORT_CORE_SOURCES CONFIGURE_DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/import/*.cpp)
+add_library(ConcordImportCore STATIC
+        ${CONCORD_IMPORT_CORE_SOURCES}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/runtime/CookedModelSource.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/ModelCookProducer.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/debug/Logger.cpp)
+target_include_directories(ConcordImportCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_definitions(ConcordImportCore PUBLIC CONCORD_STATIC_LINK)
+target_link_libraries(ConcordImportCore PUBLIC ConcordAssetCore)
+set_target_properties(ConcordImportCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # 引擎模块 -> 独立 DLL
 #   concord_add_module(<DLL名> DIR <src子目录> [LINK <依赖库...>] [PCH <头文件...>])
@@ -141,17 +163,27 @@ endfunction()
 # std::thread / std::this_thread 需要线程库 (MinGW 下即 winpthread)
 find_package(Threads REQUIRED)
 
+# 着色器编译进构建图: .sc/.sh 变更时自动用 bgfx shaderc 重生成嵌入头
+# (找不到 shaderc 时降级为使用已提交的 generated/*.bin.h)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ConcordShaders.cmake)
+concord_setup_shaders()
+
 # 注意: bgfx 为静态库, 只允许链入 CEngine 一个 DLL,
 # 其他模块需要渲染时通过 CEngine 暴露的接口访问, 避免多份 bgfx 全局状态
 concord_add_module(CEngine DIR engine LINK bgfx SDL3::SDL3 Threads::Threads shell32 PCH <bgfx/bgfx.h> <SDL3/SDL.h>)
+if(TARGET CEngine)
+    add_dependencies(CEngine concord_shaders)
+endif()
 concord_add_module(CAudio  DIR audio  LINK Phonon::Phonon SDL3::SDL3 Threads::Threads)
 concord_add_module(CGUI    DIR gui LINK CEngine)
 concord_add_module(CTime   DIR time   LINK Threads::Threads)
 concord_add_module(CSystem DIR system LINK SDL3::SDL3)
 
-# Offline incremental cooker: links only ConcordAssetCore (no bgfx / CEngine).
-add_executable(concord-cook tools/cook/main.cpp)
-target_link_libraries(concord-cook PRIVATE ConcordAssetCore)
+# Offline incremental cooker: static asset/import cores only (no bgfx / CEngine).
+add_executable(concord-cook
+        tools/cook/main.cpp
+        tools/cook/BimgTextureDecode.cpp)
+target_link_libraries(concord-cook PRIVATE ConcordImportCore bimg_decode)
 concord_set_runtime_output(concord-cook "${CMAKE_CURRENT_BINARY_DIR}/tools")
 
 if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionTests.cpp")
@@ -189,10 +221,12 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
             tests/assetCook/CookedMaterialTests.cpp
             tests/assetCook/CookedRigTests.cpp
             tests/assetCook/CookedTextureTests.cpp
+            tests/assetCook/TextureMipChainTests.cpp
             tests/assetCook/CookedAudioTests.cpp
             tests/assetCook/CookedUiDocumentTests.cpp
             tests/assetCook/CookedSceneTests.cpp
             tests/assetCook/CookedPrefabTests.cpp
+            tests/assetCook/CookedModelTests.cpp
             tests/assetCook/CookPlannerTests.cpp
             tests/assetCook/CookSessionTests.cpp
             tests/spatial/SpatialTreeTests.cpp
@@ -216,11 +250,9 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
             src/engine/asset/import/ImportBudget.cpp
             src/engine/asset/import/ImportPathSandbox.cpp
             src/engine/asset/import/ImportModelValidator.cpp
-            src/engine/asset/cook/CookedMesh.cpp
-            src/engine/asset/cook/CookedMaterial.cpp
+            # CookedMesh/Material/Model/Texture now live in ConcordAssetCore.
             src/engine/asset/cook/CookedSkeleton.cpp
             src/engine/asset/cook/CookedAnimationClip.cpp
-            src/engine/asset/cook/CookedTexture.cpp
             src/engine/asset/cook/CookedAudioClip.cpp
             src/engine/asset/cook/CookedUiDocument.cpp
             src/engine/asset/cook/CookedScene.cpp
@@ -293,6 +325,36 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
     concord_set_runtime_output(
             ConcordScreenEffectRegressionTests "${CMAKE_CURRENT_BINARY_DIR}/tests")
     add_test(NAME ConcordScreenEffectRegressionTests COMMAND ConcordScreenEffectRegressionTests)
+
+    # Audio command queue + save archive are pure CPU code; compiled as local
+    # TUs (CONCORD_STATIC_LINK collapses CENGINE_API) so the tests run without
+    # loading CAudio.dll/CEngine.dll or an audio device.
+    add_executable(ConcordAudioSaveRegressionTests
+            tests/AudioSaveRegressionTests.cpp
+            tests/audio/AudioCommandQueueTests.cpp
+            tests/save/SaveArchiveTests.cpp
+            src/audio/runtime/AudioCommandQueue.cpp
+            src/audio/runtime/AudioVoicePool.cpp
+            src/audio/runtime/AudioMixerState.cpp
+            src/audio/runtime/AudioBusRack.cpp
+            src/audio/runtime/AudioClipRegistry.cpp
+            src/audio/runtime/AudioStatsBoard.cpp
+            src/audio/effects/AudioEffectChain.cpp
+            src/audio/effects/AudioEffectFactory.cpp
+            src/audio/effects/BiquadFilter.cpp
+            src/audio/effects/CompressorEffect.cpp
+            src/audio/effects/FilterEffect.cpp
+            src/audio/effects/LimiterEffect.cpp
+            src/audio/effects/ReverbEffect.cpp
+            src/engine/save/SaveArchive.cpp
+            src/engine/save/SaveManager.cpp)
+    target_compile_definitions(ConcordAudioSaveRegressionTests PRIVATE CONCORD_STATIC_LINK)
+    target_include_directories(ConcordAudioSaveRegressionTests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(ConcordAudioSaveRegressionTests PRIVATE Threads::Threads)
+    concord_set_runtime_output(
+            ConcordAudioSaveRegressionTests "${CMAKE_CURRENT_BINARY_DIR}/tests")
+    add_test(NAME ConcordAudioSaveRegressionTests COMMAND ConcordAudioSaveRegressionTests)
 endif()
 
 # concord 聚合库: 主程序只需 target_link_libraries(... concord)

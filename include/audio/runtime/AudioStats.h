@@ -20,6 +20,7 @@ struct AudioStats {
     float peakSfx = 0.0f;
     float peakUi = 0.0f;
     float peakDialogue = 0.0f;
+    float peakAmbience = 0.0f;
 };
 
 } // namespace Concord::Audio

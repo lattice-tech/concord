@@ -1,6 +1,10 @@
 #ifndef CONCORD_CAUDIO_H
 #define CONCORD_CAUDIO_H
 
+#include "audio/effects/AudioDucking.h"
+#include "audio/effects/AudioEffectDesc.h"
+#include "audio/effects/AudioMixSnapshot.h"
+#include "audio/effects/IAudioEffect.h"
 #include "audio/runtime/AudioBus.h"
 #include "audio/runtime/AudioClip.h"
 #include "audio/runtime/AudioDeviceConfig.h"

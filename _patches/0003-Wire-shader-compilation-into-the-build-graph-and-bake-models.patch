@@ -1,0 +1,941 @@
+From e1110ccfdcbc1812315aa63431128392032a5ee1 Mon Sep 17 00:00:00 2001
+From: "kortneythw.tyquisha" <kortneythw.tyquisha@outlook.com>
+Date: Fri, 31 Jul 2026 04:17:58 +0000
+Subject: [PATCH] Wire shader compilation into the build graph and bake models
+ through the cook pipeline
+
+- shaders.manifest.tsv is now the single source of truth for shader builds;
+  cmake/ConcordShaders.cmake compiles changed .sc/.sh to embedded SPIR-V
+  headers as part of every build (graceful skip when shaderc is absent),
+  and build_shaders.ps1 reads the same manifest for manual full rebuilds.
+- New CookedModel container ('CMDL'): per-submesh CookedMesh+CookedMaterial
+  blobs, bounds and name; deterministic encode, hardened decode.
+- concord-cook now imports mesh assets and bakes real CookedModel blobs
+  (skinned models stay on the passthrough path for now) via the new
+  ConcordImportCore static library (CPU importers, no bgfx).
+- New runtime CookedModelSource opens a cooked package (+manifest), verifies
+  output hashes and serves parsed models; ModelLoader consults an installed
+  cooked source first and falls back to live import on a miss.
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ CMakeLists.txt                                |  35 ++++-
+ cmake/ConcordShaders.cmake                    |  97 ++++++++++++++
+ include/Concord/CExport.h                     |   7 +-
+ include/engine/asset/cook/CookedModel.h       |  59 ++++++++
+ include/engine/asset/cook/ModelCookProducer.h |  27 ++++
+ include/engine/asset/import/ModelLoader.h     |  11 ++
+ .../engine/asset/runtime/CookedModelSource.h  |  58 ++++++++
+ src/engine/asset/cook/CookedModel.cpp         | 126 ++++++++++++++++++
+ src/engine/asset/cook/ModelCookProducer.cpp   |  35 +++++
+ src/engine/asset/import/ModelLoader.cpp       |  21 +++
+ .../asset/runtime/CookedModelSource.cpp       |  80 +++++++++++
+ src/engine/render/shaders/build_shaders.ps1   |  88 ++----------
+ .../render/shaders/shaders.manifest.tsv       |  63 +++++++++
+ tools/cook/main.cpp                           |  10 +-
+ 14 files changed, 633 insertions(+), 84 deletions(-)
+ create mode 100644 cmake/ConcordShaders.cmake
+ create mode 100644 include/engine/asset/cook/CookedModel.h
+ create mode 100644 include/engine/asset/cook/ModelCookProducer.h
+ create mode 100644 include/engine/asset/runtime/CookedModelSource.h
+ create mode 100644 src/engine/asset/cook/CookedModel.cpp
+ create mode 100644 src/engine/asset/cook/ModelCookProducer.cpp
+ create mode 100644 src/engine/asset/runtime/CookedModelSource.cpp
+ create mode 100644 src/engine/render/shaders/shaders.manifest.tsv
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8e8964b..34f6334 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -79,12 +79,31 @@ set(CONCORD_ASSET_CORE_SOURCES
+         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookCatalog.cpp
+         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookSession.cpp
+         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookIo.cpp
++        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookedMesh.cpp
++        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookedMaterial.cpp
++        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/CookedModel.cpp
+         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/serialization/BinaryReader.cpp
+         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/serialization/BinaryWriter.cpp)
+ add_library(ConcordAssetCore STATIC ${CONCORD_ASSET_CORE_SOURCES})
+ target_include_directories(ConcordAssetCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+ set_target_properties(ConcordAssetCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
+ 
++# CPU-only model importers shared by CEngine (via its own compilation of the
++# same sources) and concord-cook, so the cooker can bake real CookedModel
++# blobs without linking bgfx or CEngine.dll. Compiled with CONCORD_STATIC_LINK
++# so CENGINE_API collapses to nothing inside the static archive.
++file(GLOB_RECURSE CONCORD_IMPORT_CORE_SOURCES CONFIGURE_DEPENDS
++        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/import/*.cpp)
++add_library(ConcordImportCore STATIC
++        ${CONCORD_IMPORT_CORE_SOURCES}
++        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/runtime/CookedModelSource.cpp
++        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/asset/cook/ModelCookProducer.cpp
++        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/debug/Logger.cpp)
++target_include_directories(ConcordImportCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
++target_compile_definitions(ConcordImportCore PUBLIC CONCORD_STATIC_LINK)
++target_link_libraries(ConcordImportCore PUBLIC ConcordAssetCore)
++set_target_properties(ConcordImportCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
++
+ # 引擎模块 -> 独立 DLL
+ #   concord_add_module(<DLL名> DIR <src子目录> [LINK <依赖库...>] [PCH <头文件...>])
+ #   约定: 模块源码在 src/<DIR>/, 公共头在 include/Concord/
+@@ -141,17 +160,25 @@ endfunction()
+ # std::thread / std::this_thread 需要线程库 (MinGW 下即 winpthread)
+ find_package(Threads REQUIRED)
+ 
++# 着色器编译进构建图: .sc/.sh 变更时自动用 bgfx shaderc 重生成嵌入头
++# (找不到 shaderc 时降级为使用已提交的 generated/*.bin.h)
++include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ConcordShaders.cmake)
++concord_setup_shaders()
++
+ # 注意: bgfx 为静态库, 只允许链入 CEngine 一个 DLL,
+ # 其他模块需要渲染时通过 CEngine 暴露的接口访问, 避免多份 bgfx 全局状态
+ concord_add_module(CEngine DIR engine LINK bgfx SDL3::SDL3 Threads::Threads shell32 PCH <bgfx/bgfx.h> <SDL3/SDL.h>)
++if(TARGET CEngine)
++    add_dependencies(CEngine concord_shaders)
++endif()
+ concord_add_module(CAudio  DIR audio  LINK Phonon::Phonon SDL3::SDL3 Threads::Threads)
+ concord_add_module(CGUI    DIR gui LINK CEngine)
+ concord_add_module(CTime   DIR time   LINK Threads::Threads)
+ concord_add_module(CSystem DIR system LINK SDL3::SDL3)
+ 
+-# Offline incremental cooker: links only ConcordAssetCore (no bgfx / CEngine).
++# Offline incremental cooker: static asset/import cores only (no bgfx / CEngine).
+ add_executable(concord-cook tools/cook/main.cpp)
+-target_link_libraries(concord-cook PRIVATE ConcordAssetCore)
++target_link_libraries(concord-cook PRIVATE ConcordImportCore)
+ concord_set_runtime_output(concord-cook "${CMAKE_CURRENT_BINARY_DIR}/tools")
+ 
+ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionTests.cpp")
+@@ -193,6 +220,7 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
+             tests/assetCook/CookedUiDocumentTests.cpp
+             tests/assetCook/CookedSceneTests.cpp
+             tests/assetCook/CookedPrefabTests.cpp
++            tests/assetCook/CookedModelTests.cpp
+             tests/assetCook/CookPlannerTests.cpp
+             tests/assetCook/CookSessionTests.cpp
+             tests/spatial/SpatialTreeTests.cpp
+@@ -216,8 +244,7 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
+             src/engine/asset/import/ImportBudget.cpp
+             src/engine/asset/import/ImportPathSandbox.cpp
+             src/engine/asset/import/ImportModelValidator.cpp
+-            src/engine/asset/cook/CookedMesh.cpp
+-            src/engine/asset/cook/CookedMaterial.cpp
++            # CookedMesh/CookedMaterial/CookedModel now live in ConcordAssetCore.
+             src/engine/asset/cook/CookedSkeleton.cpp
+             src/engine/asset/cook/CookedAnimationClip.cpp
+             src/engine/asset/cook/CookedTexture.cpp
+diff --git a/cmake/ConcordShaders.cmake b/cmake/ConcordShaders.cmake
+new file mode 100644
+index 0000000..eb41891
+--- /dev/null
++++ b/cmake/ConcordShaders.cmake
+@@ -0,0 +1,97 @@
++# Wires bgfx shader compilation into the CMake build graph.
++#
++# Reads src/engine/render/shaders/shaders.manifest.tsv (the single source of
++# truth shared with build_shaders.ps1) and emits one add_custom_command per
++# shader: shaderc compiles the .sc to SPIR-V and writes the embedded C header
++# under include/engine/render/shaders/generated/. Editing a .sc (or any local
++# .sh helper, all of which are conservative dependencies of every shader) now
++# rebuilds the header and recompiles the engine automatically instead of
++# requiring a manual build_shaders.ps1 run.
++#
++# When shaderc cannot be found (env BGFX_SHADERC or the conventional
++# _downloads location next to the repo), a warning is printed and the
++# committed generated headers are used as-is, so machines without the bgfx
++# toolchain still build.
++#
++# Usage from the top-level CMakeLists:
++#   include(cmake/ConcordShaders.cmake)
++#   concord_setup_shaders()                       # defines concord_shaders
++#   ...
++#   add_dependencies(CEngine concord_shaders)     # when the target exists
++
++function(concord_setup_shaders)
++    set(_shaderDir ${CMAKE_CURRENT_SOURCE_DIR}/src/engine/render/shaders)
++    set(_genDir ${CMAKE_CURRENT_SOURCE_DIR}/include/engine/render/shaders/generated)
++    set(_manifest ${_shaderDir}/shaders.manifest.tsv)
++
++    if(DEFINED ENV{BGFX_SHADERC})
++        set(_shaderc $ENV{BGFX_SHADERC})
++    else()
++        set(_shaderc ${CMAKE_CURRENT_SOURCE_DIR}/../_downloads/bgfx-tools-build/cmake/bgfx/shaderc.exe)
++    endif()
++    if(DEFINED ENV{BGFX_SHADER_INCLUDE})
++        set(_bgfxInc $ENV{BGFX_SHADER_INCLUDE})
++    else()
++        set(_bgfxInc ${CMAKE_CURRENT_SOURCE_DIR}/../_downloads/bgfx.cmake/bgfx/src)
++    endif()
++
++    if(NOT EXISTS ${_shaderc} OR NOT IS_DIRECTORY ${_bgfxInc})
++        message(WARNING
++            "concord: bgfx shaderc not found (looked at '${_shaderc}', include "
++            "'${_bgfxInc}'); shader .sc changes will NOT rebuild the embedded "
++            "headers. Set BGFX_SHADERC / BGFX_SHADER_INCLUDE to enable.")
++        add_custom_target(concord_shaders)
++        return()
++    endif()
++
++    # Local .sh helper headers are conservative extra dependencies for every
++    # shader (over-approximation; avoids fragile depfile path resolution).
++    file(GLOB _shaderHelpers CONFIGURE_DEPENDS ${_shaderDir}/*.sh)
++
++    file(STRINGS ${_manifest} _lines)
++    set(_outputs "")
++    foreach(_line IN LISTS _lines)
++        if(_line MATCHES "^#" OR _line STREQUAL "")
++            continue()
++        endif()
++        string(REPLACE "\t" ";" _fields "${_line}")
++        list(LENGTH _fields _n)
++        if(_n LESS 5)
++            message(FATAL_ERROR "concord: malformed manifest line: '${_line}'")
++        endif()
++        list(GET _fields 0 _src)
++        list(GET _fields 1 _type)
++        list(GET _fields 2 _varying)
++        list(GET _fields 3 _defines)
++        list(GET _fields 4 _outName)
++        if(_outName STREQUAL "-")
++            get_filename_component(_outName ${_src} NAME_WE)
++        endif()
++
++        set(_out ${_genDir}/${_outName}.bin.h)
++        set(_args -f ${_shaderDir}/${_src} -o ${_out}
++                  --bin2c ${_outName}_spv --type ${_type}
++                  --platform linux -p spirv -O 3
++                  -i ${_bgfxInc} -i ${_shaderDir})
++        set(_deps ${_shaderDir}/${_src} ${_manifest} ${_shaderHelpers})
++        if(NOT _type STREQUAL "compute")
++            list(APPEND _args --varyingdef ${_shaderDir}/${_varying})
++            list(APPEND _deps ${_shaderDir}/${_varying})
++        endif()
++        if(NOT _defines STREQUAL "-")
++            list(APPEND _args --define ${_defines})
++        endif()
++
++        add_custom_command(
++            OUTPUT ${_out}
++            COMMAND ${_shaderc} ${_args}
++            DEPENDS ${_deps}
++            WORKING_DIRECTORY ${_shaderDir}
++            COMMENT "shaderc ${_outName} (SPIR-V)"
++            VERBATIM)
++        list(APPEND _outputs ${_out})
++    endforeach()
++
++    add_custom_target(concord_shaders DEPENDS ${_outputs})
++    message(STATUS "concord: shader build graph enabled (${_shaderc})")
++endfunction()
+diff --git a/include/Concord/CExport.h b/include/Concord/CExport.h
+index a3bf6df..27667fd 100644
+--- a/include/Concord/CExport.h
++++ b/include/Concord/CExport.h
+@@ -9,7 +9,12 @@
+  * selects the export macro below; every other translation unit (the
+  * application, or a different module) only ever sees the import macro.
+  */
+-#if defined(_WIN32)
++#if defined(CONCORD_STATIC_LINK)
++    // Offline tools (e.g. concord-cook) compile engine sources into a static
++    // library or directly into the executable; no DLL boundary exists there.
++    #define CONCORD_DLL_EXPORT
++    #define CONCORD_DLL_IMPORT
++#elif defined(_WIN32)
+     #define CONCORD_DLL_EXPORT __declspec(dllexport)
+     #define CONCORD_DLL_IMPORT __declspec(dllimport)
+ #else
+diff --git a/include/engine/asset/cook/CookedModel.h b/include/engine/asset/cook/CookedModel.h
+new file mode 100644
+index 0000000..f201917
+--- /dev/null
++++ b/include/engine/asset/cook/CookedModel.h
+@@ -0,0 +1,59 @@
++#ifndef CONCORD_COOKEDMODEL_H
++#define CONCORD_COOKEDMODEL_H
++
++#include "engine/asset/cook/CookedMaterial.h"
++#include "engine/asset/cook/CookedMesh.h"
++#include "engine/asset/import/ImportedModel.h"
++
++#include <cstddef>
++#include <cstdint>
++#include <optional>
++#include <vector>
++
++namespace Concord::Asset {
++
++/** Resource ceilings enforced when decoding an untrusted cooked model. */
++struct CookedModelLimits {
++    std::uint32_t maxSubMeshes = 1024u;
++    std::uint32_t maxNameBytes = 1024u;
++    CookedMeshLimits mesh{};
++    CookedMaterialLimits material{};
++};
++
++/**
++ * @brief Versioned little-endian binary container for a cooked static model.
++ *
++ * The runtime-ready form of one imported model file: the model's name, its
++ * axis-aligned bounds, and each sub-mesh as an embedded CookedMesh blob paired
++ * with an embedded CookedMaterial blob. Encoding is deterministic so
++ * re-cooking an identical ImportedModel yields byte-identical output.
++ *
++ * M1 scope is static geometry: skeletons and animation clips are not stored,
++ * so a skinned model must not be encoded through this container (the cook
++ * producer keeps skinned sources on the passthrough path and the runtime
++ * falls back to live import for them).
++ */
++namespace CookedModel {
++
++/** True when the first bytes carry this container's magic/version header. */
++bool LooksLikeCookedModel(const std::uint8_t* data, std::size_t size) noexcept;
++
++/**
++ * Encodes the static portion of `model` to the deterministic cooked byte
++ * form. Returns an empty vector when the model is skinned or has no geometry.
++ */
++std::vector<std::uint8_t> Encode(const ImportedModel& model);
++
++/**
++ * Decodes a cooked model blob. Returns nullopt on bad magic/version,
++ * truncation, trailing bytes, a rejected embedded mesh/material blob, or a
++ * count above `limits`. The result carries an empty skeleton and no clips.
++ */
++std::optional<ImportedModel> Decode(const std::uint8_t* data, std::size_t size,
++                                    const CookedModelLimits& limits = {});
++
++} // namespace CookedModel
++
++} // namespace Concord::Asset
++
++#endif // CONCORD_COOKEDMODEL_H
+diff --git a/include/engine/asset/cook/ModelCookProducer.h b/include/engine/asset/cook/ModelCookProducer.h
+new file mode 100644
+index 0000000..c7f7135
+--- /dev/null
++++ b/include/engine/asset/cook/ModelCookProducer.h
+@@ -0,0 +1,27 @@
++#ifndef CONCORD_MODELCOOKPRODUCER_H
++#define CONCORD_MODELCOOKPRODUCER_H
++
++#include "engine/asset/cook/CookSession.h"
++
++namespace Concord::Asset {
++
++/**
++ * @brief The cook producer used by the offline cooker for real asset baking.
++ *
++ * For AssetType::Mesh entries it imports the source model file (OBJ, glTF,
++ * DAE, ...) through the shared importer registry and encodes the result as a
++ * CookedModel container, so the runtime can load fully parsed geometry
++ * without touching the development source format. Skinned models are not yet
++ * representable in CookedModel (M1) and fall back to the passthrough
++ * encoding, as does every non-mesh asset type; the runtime detects the
++ * container magic and falls back to live import when a cooked blob is not a
++ * CookedModel.
++ *
++ * The returned callable matches CookProduceFn and is safe to hand straight to
++ * CookSession.
++ */
++CookProduceFn MakeModelCookProduce();
++
++} // namespace Concord::Asset
++
++#endif // CONCORD_MODELCOOKPRODUCER_H
+diff --git a/include/engine/asset/import/ModelLoader.h b/include/engine/asset/import/ModelLoader.h
+index 7f26737..3b58ba4 100644
+--- a/include/engine/asset/import/ModelLoader.h
++++ b/include/engine/asset/import/ModelLoader.h
+@@ -9,6 +9,8 @@
+ 
+ namespace Concord::Asset {
+ 
++class CookedModelSource;
++
+ /**
+  * The high-level entry point for loading a model file.
+  *
+@@ -26,6 +28,15 @@ public:
+      */
+     static ImportedModel Import(const std::string& path,
+                                 const ImportOptions& options = {});
++
++    /**
++     * Installs (or clears, with nullptr) the cooked package consulted before
++     * live import. When set, Import first asks the source for a cooked model
++     * under `path` and only falls back to the extension-dispatched importers
++     * on a miss. The source must outlive its installation and be swapped from
++     * one thread only.
++     */
++    static void SetCookedSource(const CookedModelSource* source) noexcept;
+ };
+ 
+ } // namespace Concord::Asset
+diff --git a/include/engine/asset/runtime/CookedModelSource.h b/include/engine/asset/runtime/CookedModelSource.h
+new file mode 100644
+index 0000000..d3e4ddb
+--- /dev/null
++++ b/include/engine/asset/runtime/CookedModelSource.h
+@@ -0,0 +1,58 @@
++#ifndef CONCORD_COOKEDMODELSOURCE_H
++#define CONCORD_COOKEDMODELSOURCE_H
++
++#include "Concord/CExport.h"
++#include "engine/asset/cook/CookManifest.h"
++#include "engine/asset/import/ImportedModel.h"
++
++#include <string>
++
++namespace Concord::Asset {
++
++/**
++ * @brief Runtime view over one cooked package (output directory + manifest).
++ *
++ * The consuming half of the offline cook pipeline: opens the cooked output
++ * directory and its manifest, then serves fully parsed models by virtual path
++ * without ever touching the development source formats. Every load verifies
++ * the blob on disk against the manifest's recorded output hash, so a
++ * truncated or tampered cooked file is rejected instead of trusted.
++ *
++ * Install an opened source into ModelLoader (SetCookedSource) to make every
++ * model import try the cooked package first and fall back to live source
++ * import on a miss — development machines without a cook run keep working,
++ * shipped builds skip the importers entirely.
++ */
++class CENGINE_API CookedModelSource {
++public:
++    /**
++     * Opens the package rooted at `outputRoot` using the manifest at
++     * `manifestPath`. Returns false and sets `errorOut` when the manifest is
++     * missing or malformed; the source then stays closed.
++     */
++    bool Open(const std::string& outputRoot, const std::string& manifestPath,
++              std::string& errorOut);
++
++    /** Forgets the manifest; TryLoadModel misses until the next Open. */
++    void Close() noexcept;
++
++    bool IsOpen() const noexcept { return m_open; }
++
++    /**
++     * Loads the cooked model recorded for `virtualPath` (the same
++     * project-relative reference used at cook time). Returns false — without
++     * logging — when the source is closed, the path has no record, the blob
++     * fails its hash check, or the blob is not a CookedModel container (e.g.
++     * a skinned passthrough), so the caller can fall back to live import.
++     */
++    bool TryLoadModel(const std::string& virtualPath, ImportedModel& out) const;
++
++private:
++    std::string m_root;
++    CookManifest m_manifest;
++    bool m_open = false;
++};
++
++} // namespace Concord::Asset
++
++#endif // CONCORD_COOKEDMODELSOURCE_H
+diff --git a/src/engine/asset/cook/CookedModel.cpp b/src/engine/asset/cook/CookedModel.cpp
+new file mode 100644
+index 0000000..0aa7856
+--- /dev/null
++++ b/src/engine/asset/cook/CookedModel.cpp
+@@ -0,0 +1,126 @@
++#include "engine/asset/cook/CookedModel.h"
++
++#include "engine/serialization/BinaryReader.h"
++#include "engine/serialization/BinaryWriter.h"
++
++#include <string>
++
++namespace Concord::Asset::CookedModel {
++
++namespace {
++
++using Serialization::BinaryReader;
++using Serialization::BinaryWriter;
++
++constexpr std::uint32_t kMagic = 0x4c444d43u; // 'CMDL' in file order
++constexpr std::uint32_t kVersion = 1;
++
++// Generous per-blob ceiling; the embedded codecs re-validate their own counts.
++constexpr std::size_t kMaxBlobBytes = 512ull * 1024ull * 1024ull;
++
++void PutVec3(BinaryWriter& writer, const Vector3& value)
++{
++    writer.PutF32(value.x);
++    writer.PutF32(value.y);
++    writer.PutF32(value.z);
++}
++
++Vector3 GetVec3(BinaryReader& reader)
++{
++    Vector3 value;
++    value.x = reader.GetF32();
++    value.y = reader.GetF32();
++    value.z = reader.GetF32();
++    return value;
++}
++
++} // namespace
++
++bool LooksLikeCookedModel(const std::uint8_t* data, std::size_t size) noexcept
++{
++    if (data == nullptr || size < 8) {
++        return false;
++    }
++    const std::uint32_t magic = static_cast<std::uint32_t>(data[0])
++        | (static_cast<std::uint32_t>(data[1]) << 8)
++        | (static_cast<std::uint32_t>(data[2]) << 16)
++        | (static_cast<std::uint32_t>(data[3]) << 24);
++    return magic == kMagic;
++}
++
++std::vector<std::uint8_t> Encode(const ImportedModel& model)
++{
++    if (model.IsSkinned() || !model.HasGeometry()) {
++        return {};
++    }
++
++    BinaryWriter writer;
++    writer.PutU32(kMagic);
++    writer.PutU32(kVersion);
++    writer.PutString(model.name);
++    PutVec3(writer, model.boundsMin);
++    PutVec3(writer, model.boundsMax);
++    writer.PutU32(static_cast<std::uint32_t>(model.meshes.size()));
++
++    for (const ImportedSubMesh& subMesh : model.meshes) {
++        const std::vector<std::uint8_t> mesh =
++            CookedMesh::Encode(subMesh.geometry);
++        const std::vector<std::uint8_t> material =
++            CookedMaterial::Encode(subMesh.material);
++        writer.PutBytes(mesh.data(), mesh.size());
++        writer.PutBytes(material.data(), material.size());
++    }
++    return writer.Take();
++}
++
++std::optional<ImportedModel> Decode(const std::uint8_t* data, std::size_t size,
++                                    const CookedModelLimits& limits)
++{
++    BinaryReader reader(data, size);
++    if (reader.GetU32() != kMagic || reader.GetU32() != kVersion) {
++        return std::nullopt;
++    }
++
++    ImportedModel model;
++    model.name = reader.GetString(limits.maxNameBytes);
++    model.boundsMin = GetVec3(reader);
++    model.boundsMax = GetVec3(reader);
++
++    const std::uint32_t subMeshCount = reader.GetU32();
++    if (!reader.Ok() || subMeshCount == 0 || subMeshCount > limits.maxSubMeshes) {
++        return std::nullopt;
++    }
++
++    model.meshes.reserve(subMeshCount);
++    for (std::uint32_t i = 0; i < subMeshCount; ++i) {
++        std::string meshBlob;
++        reader.GetBytes(meshBlob, kMaxBlobBytes);
++        std::string materialBlob;
++        reader.GetBytes(materialBlob, kMaxBlobBytes);
++        if (!reader.Ok()) {
++            return std::nullopt;
++        }
++
++        auto mesh = CookedMesh::Decode(
++            reinterpret_cast<const std::uint8_t*>(meshBlob.data()),
++            meshBlob.size(), limits.mesh);
++        auto material = CookedMaterial::Decode(
++            reinterpret_cast<const std::uint8_t*>(materialBlob.data()),
++            materialBlob.size(), limits.material);
++        if (!mesh || !material) {
++            return std::nullopt;
++        }
++
++        ImportedSubMesh subMesh;
++        subMesh.geometry = std::move(*mesh);
++        subMesh.material = std::move(*material);
++        model.meshes.push_back(std::move(subMesh));
++    }
++
++    if (!reader.AtEnd()) {
++        return std::nullopt;
++    }
++    return model;
++}
++
++} // namespace Concord::Asset::CookedModel
+diff --git a/src/engine/asset/cook/ModelCookProducer.cpp b/src/engine/asset/cook/ModelCookProducer.cpp
+new file mode 100644
+index 0000000..2351f82
+--- /dev/null
++++ b/src/engine/asset/cook/ModelCookProducer.cpp
+@@ -0,0 +1,35 @@
++#include "engine/asset/cook/ModelCookProducer.h"
++
++#include "engine/asset/cook/CookedModel.h"
++#include "engine/asset/id/AssetType.h"
++#include "engine/asset/import/ModelLoader.h"
++
++namespace Concord::Asset {
++
++CookProduceFn MakeModelCookProduce()
++{
++    return [](const CookCatalogEntry& entry, AssetContentHash resolvedHash,
++              std::string& errorOut) -> std::optional<std::vector<std::uint8_t>> {
++        if (entry.id.Type() == AssetType::Mesh && !entry.sourcePath.empty()) {
++            const ImportedModel model = ModelLoader::Import(entry.sourcePath);
++            if (!model.HasGeometry()) {
++                errorOut = "model import produced no geometry: "
++                    + entry.sourcePath;
++                return std::nullopt;
++            }
++            if (!model.IsSkinned()) {
++                std::vector<std::uint8_t> cooked = CookedModel::Encode(model);
++                if (!cooked.empty()) {
++                    return cooked;
++                }
++                errorOut = "cooked model encoding failed: " + entry.sourcePath;
++                return std::nullopt;
++            }
++            // Skinned models are not representable in CookedModel yet; ship
++            // the source bytes so the runtime falls back to live import.
++        }
++        return EncodePassthroughCooked(entry, resolvedHash);
++    };
++}
++
++} // namespace Concord::Asset
+diff --git a/src/engine/asset/import/ModelLoader.cpp b/src/engine/asset/import/ModelLoader.cpp
+index 2cd55b6..8606454 100644
+--- a/src/engine/asset/import/ModelLoader.cpp
++++ b/src/engine/asset/import/ModelLoader.cpp
+@@ -1,13 +1,34 @@
+ #include "engine/asset/import/ModelLoader.h"
+ 
+ #include "engine/asset/import/ModelImporterRegistry.h"
++#include "engine/asset/runtime/CookedModelSource.h"
++
++#include <atomic>
+ 
+ namespace Concord::Asset {
+ 
++namespace {
++
++std::atomic<const CookedModelSource*> s_cookedSource{nullptr};
++
++} // namespace
++
+ ImportedModel ModelLoader::Import(const std::string& path,
+                                   const ImportOptions& options)
+ {
++    if (const CookedModelSource* cooked =
++            s_cookedSource.load(std::memory_order_acquire)) {
++        ImportedModel model;
++        if (cooked->TryLoadModel(path, model)) {
++            return model;
++        }
++    }
+     return ModelImporterRegistry::Instance().Import(path, options);
+ }
+ 
++void ModelLoader::SetCookedSource(const CookedModelSource* source) noexcept
++{
++    s_cookedSource.store(source, std::memory_order_release);
++}
++
+ } // namespace Concord::Asset
+diff --git a/src/engine/asset/runtime/CookedModelSource.cpp b/src/engine/asset/runtime/CookedModelSource.cpp
+new file mode 100644
+index 0000000..53f1f2c
+--- /dev/null
++++ b/src/engine/asset/runtime/CookedModelSource.cpp
+@@ -0,0 +1,80 @@
++#include "engine/asset/runtime/CookedModelSource.h"
++
++#include "engine/asset/cook/CookIo.h"
++#include "engine/asset/cook/CookSession.h"
++#include "engine/asset/cook/CookedModel.h"
++#include "engine/asset/id/AssetContentHash.h"
++#include "engine/asset/id/AssetId.h"
++#include "engine/asset/id/AssetType.h"
++
++#include <utility>
++#include <vector>
++
++namespace Concord::Asset {
++
++bool CookedModelSource::Open(const std::string& outputRoot,
++                             const std::string& manifestPath,
++                             std::string& errorOut)
++{
++    auto manifest = CookIo::LoadManifest(manifestPath, errorOut);
++    if (!manifest) {
++        return false;
++    }
++    if (manifest->Size() == 0 && !CookIo::FileExists(manifestPath)) {
++        errorOut = "cook manifest not found: " + manifestPath;
++        return false;
++    }
++    m_root = outputRoot;
++    while (!m_root.empty() && (m_root.back() == '/' || m_root.back() == '\\')) {
++        m_root.pop_back();
++    }
++    m_manifest = std::move(*manifest);
++    m_open = true;
++    return true;
++}
++
++void CookedModelSource::Close() noexcept
++{
++    m_root.clear();
++    m_manifest = CookManifest{};
++    m_open = false;
++}
++
++bool CookedModelSource::TryLoadModel(const std::string& virtualPath,
++                                     ImportedModel& out) const
++{
++    if (!m_open) {
++        return false;
++    }
++    const auto id = AssetId::FromVirtualPath(virtualPath, AssetType::Mesh);
++    if (!id) {
++        return false;
++    }
++    const CookRecord* record = m_manifest.Find(*id);
++    if (record == nullptr) {
++        return false;
++    }
++
++    const std::string path =
++        m_root + "/" + CookSession::OutputRelativePath(*id);
++    std::vector<std::uint8_t> bytes;
++    std::string error;
++    if (!CookIo::ReadFile(path, bytes, error)) {
++        return false;
++    }
++    if (HashBytes(bytes.data(), bytes.size()) != record->outputHash) {
++        return false;
++    }
++    if (!CookedModel::LooksLikeCookedModel(bytes.data(), bytes.size())) {
++        return false;
++    }
++
++    auto model = CookedModel::Decode(bytes.data(), bytes.size());
++    if (!model) {
++        return false;
++    }
++    out = std::move(*model);
++    return true;
++}
++
++} // namespace Concord::Asset
+diff --git a/src/engine/render/shaders/build_shaders.ps1 b/src/engine/render/shaders/build_shaders.ps1
+index f33d22a..cc9b724 100644
+--- a/src/engine/render/shaders/build_shaders.ps1
++++ b/src/engine/render/shaders/build_shaders.ps1
+@@ -85,77 +85,17 @@ function Build-Shader([string]$file, [string]$type, [string]$varyingDef, [string
+     Write-Host "built $combined (SPIR-V only)"
+ }
+ 
+-Build-Shader "vs_mesh.sc" "vertex" $varying
+-Build-Shader "fs_mesh.sc" "fragment" $varying
+-$varyingParticleBillboard = Join-Path $here "varying_particle_billboard.def.sc"
+-Build-Shader "vs_particle_billboard.sc" "vertex" $varyingParticleBillboard
+-Build-Shader "fs_particle_billboard.sc" "fragment" $varyingParticleBillboard
+-$varyingGpuParticle = Join-Path $here "varying_gpu_particle.def.sc"
+-Build-Shader "cs_gpu_particle_simulate.sc" "compute" $varyingGpuParticle
+-Build-Shader "vs_gpu_particle_billboard.sc" "vertex" $varyingGpuParticle
+-Build-Shader "fs_gpu_particle_billboard.sc" "fragment" $varyingGpuParticle
+-$varyingSkinned = Join-Path $here "varying_skinned.def.sc"
+-Build-Shader "vs_mesh_skinned.sc" "vertex" $varyingSkinned
+-Build-Shader "vs_shadow.sc" "vertex" $varying
+-Build-Shader "vs_shadow_skinned.sc" "vertex" $varyingSkinned
+-Build-Shader "fs_shadow.sc" "fragment" $varying
+-Build-Shader "vs_fullscreen.sc" "vertex" $varyingPresent
+-Build-Shader "fs_fxaa.sc" "fragment" $varyingPresent
+-$varyingSky = Join-Path $here "varying_sky.def.sc"
+-Build-Shader "vs_sky.sc" "vertex" $varyingSky
+-Build-Shader "fs_sky.sc" "fragment" $varyingSky
+-$varyingVolCloud = Join-Path $here "varying_volcloud.def.sc"
+-Build-Shader "vs_volcloud.sc" "vertex" $varyingVolCloud
+-Build-Shader "fs_volcloud.sc" "fragment" $varyingVolCloud
+-Build-Shader "vs_volcloud_composite.sc" "vertex" $varyingVolCloud
+-Build-Shader "fs_volcloud_composite.sc" "fragment" $varyingVolCloud
+-$varyingWater = Join-Path $here "varying_water.def.sc"
+-Build-Shader "vs_water.sc" "vertex" $varyingWater
+-Build-Shader "fs_water.sc" "fragment" $varyingWater
+-$varyingWaterBake = Join-Path $here "varying_water_bake.def.sc"
+-Build-Shader "vs_water_bake.sc" "vertex" $varyingWaterBake
+-Build-Shader "fs_water_bake.sc" "fragment" $varyingWaterBake
+-$varyingSmoke = Join-Path $here "varying_smoke.def.sc"
+-Build-Shader "vs_smoke.sc" "vertex" $varyingSmoke
+-# Two variants of the same source: SMOKE_MRT=1 (main path, writes the depth
+-# proxy on a second attachment for the composite's depth-aware upsample) and
+-# SMOKE_MRT=0 (compose-only path onto a reflection cubemap face, single
+-# color attachment only).
+-Build-Shader "fs_smoke_march.sc" "fragment" $varyingSmoke "SMOKE_MRT=1" "fs_smoke_march"
+-Build-Shader "fs_smoke_march.sc" "fragment" $varyingSmoke "SMOKE_MRT=0" "fs_smoke_march_single"
+-Build-Shader "fs_smoke_composite.sc" "fragment" $varyingSmoke
+-Build-Shader "vs_bloom.sc" "vertex" $varyingPresent
+-Build-Shader "fs_bloom_down.sc" "fragment" $varyingPresent
+-Build-Shader "fs_bloom_up.sc" "fragment" $varyingPresent
+-Build-Shader "fs_smaa_edges.sc" "fragment" $varyingPresent
+-Build-Shader "fs_smaa_weights.sc" "fragment" $varyingPresent
+-Build-Shader "fs_smaa_blend.sc" "fragment" $varyingPresent
+-Build-Shader "cs_raytrace.sc" "compute" $varying
+-Build-Shader "cs_light_cull.sc" "compute" $varying
+-# DFSPH fluid: neighbor search, dual-constraint solver, field, sparse MC.
+-Build-Shader "cs_fluid_grid_clear.sc" "compute" $varying
+-Build-Shader "cs_fluid_grid_count.sc" "compute" $varying
+-Build-Shader "cs_fluid_grid_scan.sc" "compute" $varying
+-Build-Shader "cs_fluid_grid_scatter.sc" "compute" $varying
+-Build-Shader "cs_fluid_density.sc" "compute" $varying
+-Build-Shader "cs_fluid_forces.sc" "compute" $varying
+-Build-Shader "cs_fluid_divergence.sc" "compute" $varying
+-Build-Shader "cs_fluid_pressure.sc" "compute" $varying
+-Build-Shader "cs_fluid_apply.sc" "compute" $varying
+-Build-Shader "cs_fluid_integrate.sc" "compute" $varying
+-Build-Shader "cs_fluid_finalize.sc" "compute" $varying
+-Build-Shader "cs_fluid_field_splat.sc" "compute" $varying
+-Build-Shader "cs_fluid_field_smooth.sc" "compute" $varying
+-Build-Shader "cs_fluid_mc_voxels.sc" "compute" $varying
+-Build-Shader "cs_fluid_mc_triangles.sc" "compute" $varying
+-$varyingFluid = Join-Path $here "varying_fluid.def.sc"
+-Build-Shader "vs_fluid_surface.sc" "vertex" $varyingFluid
+-Build-Shader "fs_fluid_surface.sc" "fragment" $varyingFluid
+-Build-Shader "fs_rtresolve.sc" "fragment" $varyingPresent
+-$varyingDebugText = Join-Path $here "varying_debugtext.def.sc"
+-Build-Shader "vs_debugtext.sc" "vertex" $varyingDebugText
+-Build-Shader "fs_debugtext.sc" "fragment" $varyingDebugText
+-# UI images share vs_debugtext's screen-space vertices but sample RGBA instead
+-# of a single coverage channel.
+-Build-Shader "fs_ui_image.sc" "fragment" $varyingDebugText
+-
++# The shader list lives in shaders.manifest.tsv (shared with
++# cmake/ConcordShaders.cmake, which rebuilds shaders incrementally as part of
++# the normal build). This script remains the manual full-rebuild path.
++$manifest = Join-Path $here "shaders.manifest.tsv"
++foreach ($line in Get-Content -LiteralPath $manifest) {
++    if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("#")) { continue }
++    $f = $line.Split("`t")
++    if ($f.Count -lt 5) { throw "malformed manifest line: $line" }
++    $src = $f[0]; $type = $f[1]
++    $varyingDef = Join-Path $here $f[2]
++    $defines = if ($f[3] -eq "-") { "" } else { $f[3] }
++    $outName = if ($f[4] -eq "-") { "" } else { $f[4] }
++    Build-Shader $src $type $varyingDef $defines $outName
++}
+diff --git a/src/engine/render/shaders/shaders.manifest.tsv b/src/engine/render/shaders/shaders.manifest.tsv
+new file mode 100644
+index 0000000..2255861
+--- /dev/null
++++ b/src/engine/render/shaders/shaders.manifest.tsv
+@@ -0,0 +1,63 @@
++# Concord shader build manifest - the single source of truth for which shaders
++# are compiled and how. Consumed by cmake/ConcordShaders.cmake (build graph)
++# and build_shaders.ps1 (manual full rebuild).
++#
++# TAB-separated columns: source	type	varying	defines	outName
++# Use "-" for an empty defines/outName field. outName defaults to the source
++# stem. Compute shaders ignore the varying column (kept for readability).
++vs_mesh.sc	vertex	varying.def.sc	-	-
++fs_mesh.sc	fragment	varying.def.sc	-	-
++vs_particle_billboard.sc	vertex	varying_particle_billboard.def.sc	-	-
++fs_particle_billboard.sc	fragment	varying_particle_billboard.def.sc	-	-
++cs_gpu_particle_simulate.sc	compute	varying_gpu_particle.def.sc	-	-
++vs_gpu_particle_billboard.sc	vertex	varying_gpu_particle.def.sc	-	-
++fs_gpu_particle_billboard.sc	fragment	varying_gpu_particle.def.sc	-	-
++vs_mesh_skinned.sc	vertex	varying_skinned.def.sc	-	-
++vs_shadow.sc	vertex	varying.def.sc	-	-
++vs_shadow_skinned.sc	vertex	varying_skinned.def.sc	-	-
++fs_shadow.sc	fragment	varying.def.sc	-	-
++vs_fullscreen.sc	vertex	varying_present.def.sc	-	-
++fs_fxaa.sc	fragment	varying_present.def.sc	-	-
++vs_sky.sc	vertex	varying_sky.def.sc	-	-
++fs_sky.sc	fragment	varying_sky.def.sc	-	-
++vs_volcloud.sc	vertex	varying_volcloud.def.sc	-	-
++fs_volcloud.sc	fragment	varying_volcloud.def.sc	-	-
++vs_volcloud_composite.sc	vertex	varying_volcloud.def.sc	-	-
++fs_volcloud_composite.sc	fragment	varying_volcloud.def.sc	-	-
++vs_water.sc	vertex	varying_water.def.sc	-	-
++fs_water.sc	fragment	varying_water.def.sc	-	-
++vs_water_bake.sc	vertex	varying_water_bake.def.sc	-	-
++fs_water_bake.sc	fragment	varying_water_bake.def.sc	-	-
++vs_smoke.sc	vertex	varying_smoke.def.sc	-	-
++fs_smoke_march.sc	fragment	varying_smoke.def.sc	SMOKE_MRT=1	fs_smoke_march
++fs_smoke_march.sc	fragment	varying_smoke.def.sc	SMOKE_MRT=0	fs_smoke_march_single
++fs_smoke_composite.sc	fragment	varying_smoke.def.sc	-	-
++vs_bloom.sc	vertex	varying_present.def.sc	-	-
++fs_bloom_down.sc	fragment	varying_present.def.sc	-	-
++fs_bloom_up.sc	fragment	varying_present.def.sc	-	-
++fs_smaa_edges.sc	fragment	varying_present.def.sc	-	-
++fs_smaa_weights.sc	fragment	varying_present.def.sc	-	-
++fs_smaa_blend.sc	fragment	varying_present.def.sc	-	-
++cs_raytrace.sc	compute	varying.def.sc	-	-
++cs_light_cull.sc	compute	varying.def.sc	-	-
++cs_fluid_grid_clear.sc	compute	varying.def.sc	-	-
++cs_fluid_grid_count.sc	compute	varying.def.sc	-	-
++cs_fluid_grid_scan.sc	compute	varying.def.sc	-	-
++cs_fluid_grid_scatter.sc	compute	varying.def.sc	-	-
++cs_fluid_density.sc	compute	varying.def.sc	-	-
++cs_fluid_forces.sc	compute	varying.def.sc	-	-
++cs_fluid_divergence.sc	compute	varying.def.sc	-	-
++cs_fluid_pressure.sc	compute	varying.def.sc	-	-
++cs_fluid_apply.sc	compute	varying.def.sc	-	-
++cs_fluid_integrate.sc	compute	varying.def.sc	-	-
++cs_fluid_finalize.sc	compute	varying.def.sc	-	-
++cs_fluid_field_splat.sc	compute	varying.def.sc	-	-
++cs_fluid_field_smooth.sc	compute	varying.def.sc	-	-
++cs_fluid_mc_voxels.sc	compute	varying.def.sc	-	-
++cs_fluid_mc_triangles.sc	compute	varying.def.sc	-	-
++vs_fluid_surface.sc	vertex	varying_fluid.def.sc	-	-
++fs_fluid_surface.sc	fragment	varying_fluid.def.sc	-	-
++fs_rtresolve.sc	fragment	varying_present.def.sc	-	-
++vs_debugtext.sc	vertex	varying_debugtext.def.sc	-	-
++fs_debugtext.sc	fragment	varying_debugtext.def.sc	-	-
++fs_ui_image.sc	fragment	varying_debugtext.def.sc	-	-
+diff --git a/tools/cook/main.cpp b/tools/cook/main.cpp
+index 6aa43cf..47cd15b 100644
+--- a/tools/cook/main.cpp
++++ b/tools/cook/main.cpp
+@@ -1,6 +1,7 @@
+ #include "engine/asset/cook/CookCatalog.h"
+ #include "engine/asset/cook/CookIo.h"
+ #include "engine/asset/cook/CookSession.h"
++#include "engine/asset/cook/ModelCookProducer.h"
+ #include "engine/asset/id/AssetId.h"
+ #include "engine/asset/id/AssetType.h"
+ 
+@@ -23,7 +24,7 @@ using Concord::Asset::CookIo::MakeFilesystemStorage;
+ using Concord::Asset::CookIo::ReadFile;
+ using Concord::Asset::CookIo::SaveManifest;
+ using Concord::Asset::CookSession;
+-using Concord::Asset::EncodePassthroughCooked;
++using Concord::Asset::MakeModelCookProduce;
+ 
+ constexpr std::uint32_t kCookerVersion = 1;
+ 
+@@ -186,11 +187,10 @@ int main(int argc, char** argv)
+         return 1;
+     }
+ 
++    // Mesh assets are imported and baked to CookedModel; everything else
++    // (and skinned models, for now) ships as a passthrough blob.
+     CookSession session(std::move(catalog), std::move(*prior), version,
+-                        MakeFilesystemStorage(),
+-                        [](const auto& entry, auto resolved, std::string&) {
+-                            return EncodePassthroughCooked(entry, resolved);
+-                        },
++                        MakeFilesystemStorage(), MakeModelCookProduce(),
+                         outDir);
+     const auto result = session.Run();
+     if (!result.ok) {
+-- 
+2.34.1
+

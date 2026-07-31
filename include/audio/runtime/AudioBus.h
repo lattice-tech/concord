@@ -12,7 +12,11 @@ enum class AudioBusId : std::uint8_t {
     Sfx,
     Ui,
     Dialogue,
+    Ambience,
 };
+
+/** Number of AudioBusId values, for fixed per-bus arrays. */
+inline constexpr std::uint8_t kAudioBusCount = 6;
 
 } // namespace Concord::Audio
 

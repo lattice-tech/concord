@@ -343,12 +343,28 @@ void BgfxWaterRenderer::Draw(const DrawParams& params, const SkyEnvironment& env
         bgfx::blit(params.view, params.sceneColorCopy, 0, 0, params.sceneColor);
         bgfx::blit(params.view, params.sceneDepthCopy, 0, 0, params.sceneDepth);
     }
+    // Bake the wave cascade for the first moving surface: one shared atlas,
+    // rebaked each frame on the bake view the backend ordered before this one,
+    // gives the fragment stage band-limited spectrum normals and fold-driven
+    // foam that the per-vertex Gerstner sum cannot carry.
+    bool cascadeBaked = false;
+    if (params.bakeView != kInvalidRenderView) {
+        for (std::uint32_t index = 0; index < drawn; ++index) {
+            if (surfaces[index].motion != Water::WaterMotion::Still) {
+                m_cascade.Update(params.bakeView, surfaces[index],
+                                 params.eye[0], params.eye[2]);
+                cascadeBaked = true;
+                break;
+            }
+        }
+    }
     // Real-scene reflection, when the backend ran the mirrored camera for this
     // water plane. Without it the surface only has the analytic sky to reflect,
     // which is the main reason water reads as painted rather than wet.
     const bool planar = bgfx::isValid(params.planarColor) && params.planarViewProj != nullptr;
     const float planarParams[4] = {planar ? 1.0f : 0.0f,
-                                   params.flipPlanarV ? 1.0f : 0.0f, 0.0f, 0.0f};
+                                   params.flipPlanarV ? 1.0f : 0.0f,
+                                   cascadeBaked ? 1.0f : 0.0f, 0.0f};
     const float depthParams[4] = {
         std::max(params.nearPlane, 1e-3f), std::max(params.farPlane, params.nearPlane + 1e-3f),
         bgfx::getCaps()->homogeneousDepth ? 1.0f : 0.0f, refract ? 1.0f : 0.0f};

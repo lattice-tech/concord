@@ -85,77 +85,17 @@ function Build-Shader([string]$file, [string]$type, [string]$varyingDef, [string
     Write-Host "built $combined (SPIR-V only)"
 }
 
-Build-Shader "vs_mesh.sc" "vertex" $varying
-Build-Shader "fs_mesh.sc" "fragment" $varying
-$varyingParticleBillboard = Join-Path $here "varying_particle_billboard.def.sc"
-Build-Shader "vs_particle_billboard.sc" "vertex" $varyingParticleBillboard
-Build-Shader "fs_particle_billboard.sc" "fragment" $varyingParticleBillboard
-$varyingGpuParticle = Join-Path $here "varying_gpu_particle.def.sc"
-Build-Shader "cs_gpu_particle_simulate.sc" "compute" $varyingGpuParticle
-Build-Shader "vs_gpu_particle_billboard.sc" "vertex" $varyingGpuParticle
-Build-Shader "fs_gpu_particle_billboard.sc" "fragment" $varyingGpuParticle
-$varyingSkinned = Join-Path $here "varying_skinned.def.sc"
-Build-Shader "vs_mesh_skinned.sc" "vertex" $varyingSkinned
-Build-Shader "vs_shadow.sc" "vertex" $varying
-Build-Shader "vs_shadow_skinned.sc" "vertex" $varyingSkinned
-Build-Shader "fs_shadow.sc" "fragment" $varying
-Build-Shader "vs_fullscreen.sc" "vertex" $varyingPresent
-Build-Shader "fs_fxaa.sc" "fragment" $varyingPresent
-$varyingSky = Join-Path $here "varying_sky.def.sc"
-Build-Shader "vs_sky.sc" "vertex" $varyingSky
-Build-Shader "fs_sky.sc" "fragment" $varyingSky
-$varyingVolCloud = Join-Path $here "varying_volcloud.def.sc"
-Build-Shader "vs_volcloud.sc" "vertex" $varyingVolCloud
-Build-Shader "fs_volcloud.sc" "fragment" $varyingVolCloud
-Build-Shader "vs_volcloud_composite.sc" "vertex" $varyingVolCloud
-Build-Shader "fs_volcloud_composite.sc" "fragment" $varyingVolCloud
-$varyingWater = Join-Path $here "varying_water.def.sc"
-Build-Shader "vs_water.sc" "vertex" $varyingWater
-Build-Shader "fs_water.sc" "fragment" $varyingWater
-$varyingWaterBake = Join-Path $here "varying_water_bake.def.sc"
-Build-Shader "vs_water_bake.sc" "vertex" $varyingWaterBake
-Build-Shader "fs_water_bake.sc" "fragment" $varyingWaterBake
-$varyingSmoke = Join-Path $here "varying_smoke.def.sc"
-Build-Shader "vs_smoke.sc" "vertex" $varyingSmoke
-# Two variants of the same source: SMOKE_MRT=1 (main path, writes the depth
-# proxy on a second attachment for the composite's depth-aware upsample) and
-# SMOKE_MRT=0 (compose-only path onto a reflection cubemap face, single
-# color attachment only).
-Build-Shader "fs_smoke_march.sc" "fragment" $varyingSmoke "SMOKE_MRT=1" "fs_smoke_march"
-Build-Shader "fs_smoke_march.sc" "fragment" $varyingSmoke "SMOKE_MRT=0" "fs_smoke_march_single"
-Build-Shader "fs_smoke_composite.sc" "fragment" $varyingSmoke
-Build-Shader "vs_bloom.sc" "vertex" $varyingPresent
-Build-Shader "fs_bloom_down.sc" "fragment" $varyingPresent
-Build-Shader "fs_bloom_up.sc" "fragment" $varyingPresent
-Build-Shader "fs_smaa_edges.sc" "fragment" $varyingPresent
-Build-Shader "fs_smaa_weights.sc" "fragment" $varyingPresent
-Build-Shader "fs_smaa_blend.sc" "fragment" $varyingPresent
-Build-Shader "cs_raytrace.sc" "compute" $varying
-Build-Shader "cs_light_cull.sc" "compute" $varying
-# DFSPH fluid: neighbor search, dual-constraint solver, field, sparse MC.
-Build-Shader "cs_fluid_grid_clear.sc" "compute" $varying
-Build-Shader "cs_fluid_grid_count.sc" "compute" $varying
-Build-Shader "cs_fluid_grid_scan.sc" "compute" $varying
-Build-Shader "cs_fluid_grid_scatter.sc" "compute" $varying
-Build-Shader "cs_fluid_density.sc" "compute" $varying
-Build-Shader "cs_fluid_forces.sc" "compute" $varying
-Build-Shader "cs_fluid_divergence.sc" "compute" $varying
-Build-Shader "cs_fluid_pressure.sc" "compute" $varying
-Build-Shader "cs_fluid_apply.sc" "compute" $varying
-Build-Shader "cs_fluid_integrate.sc" "compute" $varying
-Build-Shader "cs_fluid_finalize.sc" "compute" $varying
-Build-Shader "cs_fluid_field_splat.sc" "compute" $varying
-Build-Shader "cs_fluid_field_smooth.sc" "compute" $varying
-Build-Shader "cs_fluid_mc_voxels.sc" "compute" $varying
-Build-Shader "cs_fluid_mc_triangles.sc" "compute" $varying
-$varyingFluid = Join-Path $here "varying_fluid.def.sc"
-Build-Shader "vs_fluid_surface.sc" "vertex" $varyingFluid
-Build-Shader "fs_fluid_surface.sc" "fragment" $varyingFluid
-Build-Shader "fs_rtresolve.sc" "fragment" $varyingPresent
-$varyingDebugText = Join-Path $here "varying_debugtext.def.sc"
-Build-Shader "vs_debugtext.sc" "vertex" $varyingDebugText
-Build-Shader "fs_debugtext.sc" "fragment" $varyingDebugText
-# UI images share vs_debugtext's screen-space vertices but sample RGBA instead
-# of a single coverage channel.
-Build-Shader "fs_ui_image.sc" "fragment" $varyingDebugText
-
+# The shader list lives in shaders.manifest.tsv (shared with
+# cmake/ConcordShaders.cmake, which rebuilds shaders incrementally as part of
+# the normal build). This script remains the manual full-rebuild path.
+$manifest = Join-Path $here "shaders.manifest.tsv"
+foreach ($line in Get-Content -LiteralPath $manifest) {
+    if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("#")) { continue }
+    $f = $line.Split("`t")
+    if ($f.Count -lt 5) { throw "malformed manifest line: $line" }
+    $src = $f[0]; $type = $f[1]
+    $varyingDef = Join-Path $here $f[2]
+    $defines = if ($f[3] -eq "-") { "" } else { $f[3] }
+    $outName = if ($f[4] -eq "-") { "" } else { $f[4] }
+    Build-Shader $src $type $varyingDef $defines $outName
+}

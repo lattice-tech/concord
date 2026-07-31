@@ -59,12 +59,39 @@ public:
     /** True when every imported sub-mesh is using the material override. */
     bool HasMaterialOverride() const noexcept { return m_overrideMaterial; }
 
+    /**
+     * Appends a coarser detail level loaded from `path`, taking over once the
+     * camera is at least `startDistance` world units away. Levels must be
+     * added nearest-first with strictly increasing distances; sub-meshes pair
+     * with the base model by index. Returns false (and changes nothing) when
+     * the file has no geometry, the distance ordering is violated, or the
+     * per-instance level budget is exhausted.
+     */
+    bool AddLodLevel(const std::string& path, float startDistance);
+
+    /** The number of coarser detail levels added through AddLodLevel. */
+    std::size_t LodLevelCount() const noexcept { return m_lods.size(); }
+
 private:
+    struct LodLevel {
+        Asset::ImportedModel imported;
+        float startDistance = 0.0f;
+        /** One lazy-uploaded GPU mesh per sub-mesh, like the base model's. */
+        mutable std::vector<MeshHandle> meshes;
+        mutable std::vector<std::future<MeshHandle>> futures;
+    };
+
     void PrewarmMeshes();
     void CollectRender(std::vector<RenderInstance>& out) const override;
 
     /** Uploads sub-mesh `i` to the GPU on first use; returns its handle. */
     MeshHandle EnsureMesh(std::size_t i) const;
+
+    /** Uploads LOD `level`'s sub-mesh `i` on first use; returns its handle. */
+    MeshHandle EnsureLodMesh(std::size_t level, std::size_t i) const;
+
+    /** Fills `instance`'s LOD chain for base sub-mesh `i` (no-op without LODs). */
+    void FillInstanceLods(RenderInstance& instance, std::size_t i) const;
 
     ModelDesc m_desc;
     bool m_overrideMaterial = false;
@@ -81,6 +108,9 @@ private:
      * sub-mesh had no usable positions, and culling falls back to the unit cube.
      */
     std::vector<Collision::Aabb> m_subMeshBounds;
+
+    /** Coarser detail levels, ordered nearest-first (see AddLodLevel). */
+    std::vector<LodLevel> m_lods;
 };
 
 } // namespace Concord::Object

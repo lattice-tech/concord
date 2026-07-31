@@ -3,6 +3,7 @@
 #include "engine/debug/Logger.h"
 #include "engine/input/InputState.h"
 #include "engine/render/backend/BgfxRenderBackend.h"
+#include "engine/render/mesh/LodSelector.h"
 
 #include <SDL3/SDL.h>
 
@@ -229,9 +230,11 @@ void EngineLoop::Impl::Run()
                     telemetry.visibilityMs = snapshot->visibilityMs;
                     hasTelemetry = true;
                 }
+                const float* lodEye = snapshot->hasCamera ? snapshot->camera.eye : nullptr;
                 for (const RenderInstance& instance : snapshot->instances) {
-                    const MeshHandle mesh = instance.mesh.IsValid()
-                        ? instance.mesh : EnsurePrimitiveMesh(*backend, instance.shape);
+                    const MeshHandle lodMesh = SelectLodMesh(instance, lodEye);
+                    const MeshHandle mesh = lodMesh.IsValid()
+                        ? lodMesh : EnsurePrimitiveMesh(*backend, instance.shape);
                     if (!mesh.IsValid()) {
                         continue;
                     }
@@ -249,8 +252,9 @@ void EngineLoop::Impl::Run()
                 // Off-screen shadow casters take the same command form but a
                 // separate queue, so only the shadow depth pass sees them.
                 for (const RenderInstance& instance : snapshot->shadowCasters) {
-                    const MeshHandle mesh = instance.mesh.IsValid()
-                        ? instance.mesh : EnsurePrimitiveMesh(*backend, instance.shape);
+                    const MeshHandle lodMesh = SelectLodMesh(instance, lodEye);
+                    const MeshHandle mesh = lodMesh.IsValid()
+                        ? lodMesh : EnsurePrimitiveMesh(*backend, instance.shape);
                     if (!mesh.IsValid()) {
                         continue;
                     }

@@ -12,9 +12,10 @@ namespace Concord::Audio::Detail {
 using Clock = std::chrono::steady_clock;
 
 bool AudioDevice::Init(const AudioRuntimeConfig& config, AudioMixer& mixer,
-                       const AudioListenerState* listener, const AudioClipRegistry* clips,
-                       AudioVoicePool* voices, const AudioMixerState* buses,
-                       AudioStats* stats, std::recursive_mutex* renderLock)
+                       AudioListenerState* listener, const AudioClipRegistry* clips,
+                       AudioVoicePool* voices, AudioMixerState* buses,
+                       AudioCommandQueue* commands, AudioStatsBoard* stats,
+                       std::recursive_mutex* renderLock)
 {
     Shutdown();
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
@@ -30,6 +31,7 @@ bool AudioDevice::Init(const AudioRuntimeConfig& config, AudioMixer& mixer,
     m_clips = clips;
     m_voices = voices;
     m_buses = buses;
+    m_commands = commands;
     m_stats = stats;
     m_renderLock = renderLock;
     m_chunkScratch.resize(static_cast<std::size_t>(config.device.frameSize) * 2u);
@@ -82,6 +84,7 @@ void AudioDevice::Shutdown() noexcept
     m_clips = nullptr;
     m_voices = nullptr;
     m_buses = nullptr;
+    m_commands = nullptr;
     m_stats = nullptr;
     m_renderLock = nullptr;
     m_targetQueuedBytes = 0;
@@ -97,7 +100,7 @@ void AudioDevice::PumpMain() noexcept
         }
         const int queuedBytes = SDL_GetAudioStreamQueued(m_stream);
         if (queuedBytes < 0) {
-            ++m_stats->underrunCount;
+            m_stats->underrunCount.fetch_add(1, std::memory_order_relaxed);
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
@@ -112,13 +115,11 @@ void AudioDevice::PumpMain() noexcept
 void AudioDevice::FillBufferedAudio(int requestedBytes) noexcept
 {
     if (m_mixer == nullptr || m_listener == nullptr || m_clips == nullptr
-        || m_voices == nullptr || m_buses == nullptr || m_stats == nullptr
-        || m_renderLock == nullptr || m_stream == nullptr || requestedBytes <= 0) {
+        || m_voices == nullptr || m_buses == nullptr || m_commands == nullptr
+        || m_stats == nullptr || m_renderLock == nullptr || m_stream == nullptr
+        || requestedBytes <= 0) {
         return;
     }
-    // Held for the whole fill so the main thread cannot mutate voices, clips,
-    // the listener or bus state mid-mix (torn reads audible as static).
-    std::lock_guard<std::recursive_mutex> lock(*m_renderLock);
     // Always render whole fixed-size blocks: the HRTF spatializer's overlap
     // history assumes exactly frameSize frames per call, so a short tail block
     // would inject zero-padded silence into its convolution every fill and be
@@ -132,17 +133,27 @@ void AudioDevice::FillBufferedAudio(int requestedBytes) noexcept
     const auto start = Clock::now();
     int remaining = requestedBytes;
     while (remaining > 0) {
-        m_mixer->Render(m_chunkScratch.data(), chunkFrames, *m_listener,
-                        *m_clips, *m_voices, *m_buses, *m_stats);
+        // Take the structural lock per block, not per fill: it only excludes
+        // rare structural operations (clip create/destroy, voice start/stop,
+        // effect chain rebuilds), and releasing it between blocks lets the
+        // update thread interleave one such operation instead of stalling for
+        // the whole multi-block refill. Per-frame parameter changes arrive
+        // through the lock-free command queue drained at each block boundary.
+        {
+            std::lock_guard<std::recursive_mutex> lock(*m_renderLock);
+            DrainAudioCommands(*m_commands, *m_listener, *m_voices, *m_buses, *m_stats);
+            m_mixer->Render(m_chunkScratch.data(), chunkFrames, *m_listener,
+                            *m_clips, *m_voices, *m_buses, *m_stats);
+        }
         if (!SDL_PutAudioStreamData(m_stream, m_chunkScratch.data(), chunkBytes)) {
-            ++m_stats->underrunCount;
+            m_stats->underrunCount.fetch_add(1, std::memory_order_relaxed);
             std::fprintf(stderr, "[audio] SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
             break;
         }
         remaining -= chunkBytes;
     }
-    m_stats->callbackCpuMs = std::chrono::duration<float, std::milli>(
-        Clock::now() - start).count();
+    m_stats->callbackCpuMs.store(std::chrono::duration<float, std::milli>(
+        Clock::now() - start).count(), std::memory_order_relaxed);
 }
 
 } // namespace Concord::Audio::Detail

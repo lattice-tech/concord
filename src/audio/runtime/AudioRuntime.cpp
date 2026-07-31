@@ -3,12 +3,14 @@
 #include <SDL3/SDL.h>
 
 #include "audio/runtime/detail/AudioClipRegistry.h"
+#include "audio/runtime/detail/AudioCommandQueue.h"
 #include "audio/runtime/detail/AudioDevice.h"
 #include "audio/runtime/detail/AudioMixer.h"
 #include "audio/runtime/detail/AudioMixerState.h"
 #include "audio/runtime/detail/AudioValidation.h"
 #include "audio/runtime/detail/AudioVoicePool.h"
 
+#include <algorithm>
 #include <cmath>
 #include <bit>
 #include <mutex>
@@ -103,9 +105,12 @@ public:
     std::unordered_map<BuiltInCacheKey, AudioClipHandle, BuiltInCacheKeyHash> m_builtInCache;
 
     /**
-     * Guards everything the mixing thread reads (voices, clips, listener, bus
-     * state). Recursive because the public entry points funnel through each
-     * other (PlayTransient -> Play) and Pump re-enters the device fill.
+     * Guards only structural state the mixing thread reads (clip storage,
+     * voice start/stop, effect chain configuration). Per-frame parameter
+     * changes travel through the lock-free command queue instead, so the
+     * main thread never blocks the mix for hot-path updates. Recursive
+     * because the public entry points funnel through each other
+     * (PlayTransient -> Play) and Pump re-enters the device fill.
      */
     mutable std::recursive_mutex m_renderLock;
 
@@ -124,8 +129,8 @@ public:
         }
         m_config = config;
         m_initialized = true;
-        m_stats = {};
-        m_stats.initialized = true;
+        m_stats.Reset();
+        m_stats.initialized.store(true, std::memory_order_relaxed);
         m_listener = {};
         m_transientClips.clear();
         m_wavCache.clear();
@@ -134,9 +139,11 @@ public:
         m_clips.Reset(config.maxClips);
         m_voices.Reset(config.maxVoices);
         m_mixer.Reset(config.device.startMuted);
+        m_commands.Init(config.commandQueueCapacity);
         if (!m_audioMixer.Init(config)
             || !m_device.Init(config, m_audioMixer, &m_listener, &m_clips,
-                              &m_voices, &m_mixer, &m_stats, &m_renderLock)) {
+                              &m_voices, &m_mixer, &m_commands, &m_stats,
+                              &m_renderLock)) {
             Shutdown();
             return false;
         }
@@ -158,7 +165,8 @@ public:
         m_clips.Reset(0);
         m_voices.Reset(0);
         m_mixer.Reset(false);
-        m_stats = {};
+        m_commands.Reset();
+        m_stats.Reset();
     }
 
     bool IsInitialized() const noexcept
@@ -198,14 +206,16 @@ public:
         if (!m_initialized) {
             return {};
         }
-        const AudioVoiceHandle handle = m_voices.Play(clip, params, loop, m_clips,
-                                                       m_stats.rejectedCommands);
+        std::uint64_t rejected = 0;
+        const AudioVoiceHandle handle = m_voices.Play(clip, params, loop, m_clips, rejected);
         if (handle.IsValid()) {
+            m_stats.rejectedCommands.fetch_add(rejected, std::memory_order_relaxed);
             RefreshStats();
             return handle;
         }
         const AudioVoiceHandle stolen = m_voices.StealOrPlay(clip, params, loop, m_clips,
-                                                             m_stats.rejectedCommands);
+                                                             rejected);
+        m_stats.rejectedCommands.fetch_add(rejected, std::memory_order_relaxed);
         RefreshStats();
         return stolen;
     }
@@ -278,50 +288,89 @@ public:
 
     bool SetVoiceGain(AudioVoiceHandle voice, float gain)
     {
-        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
-        return m_initialized && m_voices.SetGain(voice, gain);
+        if (!voice.IsValid() || !std::isfinite(gain) || gain < 0.0f) {
+            return false;
+        }
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::SetVoiceGain;
+        command.voice = voice;
+        command.value = gain;
+        return PushOrApply(command);
     }
 
     bool SetVoicePitch(AudioVoiceHandle voice, float pitch)
     {
-        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
-        return m_initialized && m_voices.SetPitch(voice, pitch);
+        if (!voice.IsValid() || !std::isfinite(pitch) || pitch <= 0.0f) {
+            return false;
+        }
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::SetVoicePitch;
+        command.voice = voice;
+        command.value = pitch;
+        return PushOrApply(command);
     }
 
     bool SetVoiceBus(AudioVoiceHandle voice, AudioBusId bus)
     {
-        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
-        return m_initialized && m_voices.SetBus(voice, bus);
+        if (!voice.IsValid()) {
+            return false;
+        }
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::SetVoiceBus;
+        command.voice = voice;
+        command.bus = bus;
+        return PushOrApply(command);
     }
 
     bool SetVoiceSpatialBlend(AudioVoiceHandle voice, float spatialBlend)
     {
-        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
-        return m_initialized && m_voices.SetSpatialBlend(voice, spatialBlend);
+        if (!voice.IsValid() || !std::isfinite(spatialBlend)) {
+            return false;
+        }
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::SetVoiceSpatialBlend;
+        command.voice = voice;
+        command.value = spatialBlend;
+        return PushOrApply(command);
     }
 
     bool SetVoicePosition(AudioVoiceHandle voice, Vector3 position)
     {
-        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
-        return UpdateVoiceSource(voice, [position](AudioSourceState& source) {
-            source.position = position;
-        });
+        if (!voice.IsValid() || !std::isfinite(position.x)
+            || !std::isfinite(position.y) || !std::isfinite(position.z)) {
+            return false;
+        }
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::PatchVoicePosition;
+        command.voice = voice;
+        command.vec = position;
+        return PushOrApply(command);
     }
 
     bool SetVoiceOrientation(AudioVoiceHandle voice, Vector3 forward)
     {
-        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
-        return UpdateVoiceSource(voice, [forward](AudioSourceState& source) {
-            source.forward = forward;
-        });
+        if (!voice.IsValid() || !std::isfinite(forward.x)
+            || !std::isfinite(forward.y) || !std::isfinite(forward.z)) {
+            return false;
+        }
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::PatchVoiceForward;
+        command.voice = voice;
+        command.vec = forward;
+        return PushOrApply(command);
     }
 
     bool SetVoiceVelocity(AudioVoiceHandle voice, Vector3 velocity)
     {
-        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
-        return UpdateVoiceSource(voice, [velocity](AudioSourceState& source) {
-            source.velocity = velocity;
-        });
+        if (!voice.IsValid() || !std::isfinite(velocity.x)
+            || !std::isfinite(velocity.y) || !std::isfinite(velocity.z)) {
+            return false;
+        }
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::PatchVoiceVelocity;
+        command.voice = voice;
+        command.vec = velocity;
+        return PushOrApply(command);
     }
 
     bool SetVoiceDistanceRange(AudioVoiceHandle voice, float minDistance,
@@ -383,43 +432,145 @@ public:
 
     bool SetVoiceSpatialState(AudioVoiceHandle voice, const AudioSourceState& source)
     {
-        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
-        return m_initialized && m_voices.SetSpatialState(voice, source);
+        if (!voice.IsValid() || !Detail::IsFinite(source)) {
+            return false;
+        }
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::SetVoiceSpatialState;
+        command.voice = voice;
+        command.source = source;
+        return PushOrApply(command);
+    }
+
+    bool SetVoiceOcclusion(AudioVoiceHandle voice, float occlusion)
+    {
+        if (!voice.IsValid() || !std::isfinite(occlusion)) {
+            return false;
+        }
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::PatchVoiceOcclusion;
+        command.voice = voice;
+        command.value = std::clamp(occlusion, 0.0f, 1.0f);
+        return PushOrApply(command);
     }
 
     void SetListener(const AudioListenerState& listener)
     {
-        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
-        if (!m_initialized || !Detail::IsFinite(listener)) {
+        if (!Detail::IsFinite(listener)) {
             return;
         }
-        m_listener = listener;
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::SetListener;
+        command.listener = listener;
+        PushOrApply(command);
     }
 
     void SetBusGain(AudioBusId bus, float gain)
     {
-        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
-        if (!m_initialized || !std::isfinite(gain) || gain < 0.0f) {
+        if (!std::isfinite(gain) || gain < 0.0f) {
             return;
         }
-        m_mixer.SetBusGain(bus, gain);
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::SetBusGain;
+        command.bus = bus;
+        command.value = gain;
+        PushOrApply(command);
     }
 
     void SetBusMute(AudioBusId bus, bool mute)
+    {
+        Detail::AudioCommand command;
+        command.kind = Detail::AudioCommandKind::SetBusMute;
+        command.bus = bus;
+        command.flag = mute;
+        PushOrApply(command);
+    }
+
+    void SetBusEffects(AudioBusId bus, std::span<const AudioEffectDesc> effects)
     {
         const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
         if (!m_initialized) {
             return;
         }
-        m_mixer.SetBusMute(bus, mute);
+        m_mixer.SetBusEffects(bus, effects);
+    }
+
+    void ClearBusEffects(AudioBusId bus)
+    {
+        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
+        if (!m_initialized) {
+            return;
+        }
+        m_mixer.ClearBusEffects(bus);
+    }
+
+    void SetDucking(const AudioDuckingDesc& ducking)
+    {
+        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
+        if (!m_initialized || ducking.trigger == ducking.target
+            || !std::isfinite(ducking.thresholdLinear)
+            || !std::isfinite(ducking.duckedGain)
+            || !std::isfinite(ducking.attackSeconds)
+            || !std::isfinite(ducking.releaseSeconds)) {
+            return;
+        }
+        m_mixer.SetDucking(ducking);
+    }
+
+    void ClearDucking()
+    {
+        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
+        if (!m_initialized) {
+            return;
+        }
+        m_mixer.ClearDucking();
+    }
+
+    void DefineMixSnapshot(const std::string& name, const AudioMixSnapshotDesc& snapshot)
+    {
+        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
+        if (!m_initialized || name.empty()) {
+            return;
+        }
+        m_mixer.DefineSnapshot(name, snapshot);
+    }
+
+    bool RemoveMixSnapshot(const std::string& name)
+    {
+        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
+        return m_initialized && m_mixer.RemoveSnapshot(name);
+    }
+
+    bool ApplyMixSnapshot(const std::string& name, float fadeSeconds)
+    {
+        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
+        return m_initialized && m_mixer.ApplySnapshot(name, fadeSeconds);
     }
 
     AudioStats Stats() const noexcept
     {
-        return m_stats;
+        return m_stats.Snapshot();
     }
 
 private:
+    /**
+     * Routes a parameter command to the mixing thread without blocking it:
+     * the lock-free push is the normal path, and only a momentarily full
+     * ring falls back to applying the command under the render lock.
+     */
+    bool PushOrApply(const Detail::AudioCommand& command)
+    {
+        if (!m_initialized) {
+            return false;
+        }
+        if (m_commands.TryPush(command)) {
+            return true;
+        }
+        const std::lock_guard<std::recursive_mutex> lock(m_renderLock);
+        Detail::ApplyAudioCommand(command, m_listener, m_voices, m_mixer);
+        return true;
+    }
+
     template <typename Mutator>
     bool UpdateVoiceSource(AudioVoiceHandle voice, Mutator mutator)
     {
@@ -449,9 +600,10 @@ private:
 
     void RefreshStats() noexcept
     {
-        m_stats.initialized = m_initialized;
-        m_stats.activeVoices = m_voices.ActiveVoiceCount();
-        m_stats.activeSpatialVoices = m_voices.ActiveSpatialVoiceCount();
+        m_stats.initialized.store(m_initialized, std::memory_order_relaxed);
+        m_stats.activeVoices.store(m_voices.ActiveVoiceCount(), std::memory_order_relaxed);
+        m_stats.activeSpatialVoices.store(m_voices.ActiveSpatialVoiceCount(),
+                                          std::memory_order_relaxed);
     }
 
     AudioRuntimeConfig m_config{};
@@ -459,10 +611,11 @@ private:
     Detail::AudioClipRegistry m_clips;
     Detail::AudioVoicePool m_voices;
     Detail::AudioMixerState m_mixer;
+    Detail::AudioCommandQueue m_commands;
     Detail::AudioMixer m_audioMixer;
     Detail::AudioDevice m_device;
     std::vector<TransientClipBinding> m_transientClips;
-    AudioStats m_stats{};
+    Detail::AudioStatsBoard m_stats;
     bool m_initialized = false;
 };
 
@@ -889,6 +1042,58 @@ void AudioRuntime::SetBusMute(AudioBusId bus, bool mute)
     if (m_impl) {
         m_impl->SetBusMute(bus, mute);
     }
+}
+
+bool AudioRuntime::SetVoiceOcclusion(AudioVoiceHandle voice, float occlusion)
+{
+    return m_impl && m_impl->SetVoiceOcclusion(voice, occlusion);
+}
+
+void AudioRuntime::SetBusEffects(AudioBusId bus,
+                                 std::span<const AudioEffectDesc> effects)
+{
+    if (m_impl) {
+        m_impl->SetBusEffects(bus, effects);
+    }
+}
+
+void AudioRuntime::ClearBusEffects(AudioBusId bus)
+{
+    if (m_impl) {
+        m_impl->ClearBusEffects(bus);
+    }
+}
+
+void AudioRuntime::SetDucking(const AudioDuckingDesc& ducking)
+{
+    if (m_impl) {
+        m_impl->SetDucking(ducking);
+    }
+}
+
+void AudioRuntime::ClearDucking()
+{
+    if (m_impl) {
+        m_impl->ClearDucking();
+    }
+}
+
+void AudioRuntime::DefineMixSnapshot(const std::string& name,
+                                     const AudioMixSnapshotDesc& snapshot)
+{
+    if (m_impl) {
+        m_impl->DefineMixSnapshot(name, snapshot);
+    }
+}
+
+bool AudioRuntime::RemoveMixSnapshot(const std::string& name)
+{
+    return m_impl && m_impl->RemoveMixSnapshot(name);
+}
+
+bool AudioRuntime::ApplyMixSnapshot(const std::string& name, float fadeSeconds)
+{
+    return m_impl && m_impl->ApplyMixSnapshot(name, fadeSeconds);
 }
 
 AudioStats AudioRuntime::Stats() const noexcept

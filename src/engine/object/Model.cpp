@@ -148,6 +148,13 @@ Model::~Model()
                 scene->ReleaseMesh(handle);
             }
         }
+        for (const LodLevel& lod : m_lods) {
+            for (MeshHandle handle : lod.meshes) {
+                if (handle.IsValid()) {
+                    scene->ReleaseMesh(handle);
+                }
+            }
+        }
     }
 }
 
@@ -222,6 +229,7 @@ void Model::CollectRender(std::vector<RenderInstance>& out) const
         instance.material.cull = CullMode::None;
         instance.rayTraced = UsesRealtimeReflection();
         instance.reflectionOwner = instance.rayTraced ? ReflectionOwnerKey() : 0;
+        FillInstanceLods(instance, i);
         out.push_back(instance);
     }
 }

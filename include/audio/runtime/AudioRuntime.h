@@ -2,6 +2,9 @@
 #define CONCORD_AUDIORUNTIME_H
 
 #include "Concord/CExport.h"
+#include "audio/effects/AudioDucking.h"
+#include "audio/effects/AudioEffectDesc.h"
+#include "audio/effects/AudioMixSnapshot.h"
 #include "audio/runtime/AudioBus.h"
 #include "audio/runtime/AudioClip.h"
 #include "audio/runtime/AudioListenerState.h"
@@ -14,6 +17,7 @@
 
 #include <memory>
 #include <span>
+#include <string>
 
 namespace Concord::Audio {
 
@@ -113,10 +117,22 @@ public:
                       float outerConeDegrees, float outerConeGain);
     bool SetVoiceSpatialState(AudioVoiceHandle voice,
                               const AudioSourceState& source);
+    bool SetVoiceOcclusion(AudioVoiceHandle voice, float occlusion);
 
     void SetListener(const AudioListenerState& listener);
     void SetBusGain(AudioBusId bus, float gain);
     void SetBusMute(AudioBusId bus, bool mute);
+
+    void SetBusEffects(AudioBusId bus, std::span<const AudioEffectDesc> effects);
+    void ClearBusEffects(AudioBusId bus);
+
+    void SetDucking(const AudioDuckingDesc& ducking);
+    void ClearDucking();
+
+    void DefineMixSnapshot(const std::string& name,
+                           const AudioMixSnapshotDesc& snapshot);
+    bool RemoveMixSnapshot(const std::string& name);
+    bool ApplyMixSnapshot(const std::string& name, float fadeSeconds = 0.5f);
 
     AudioStats Stats() const noexcept;
 

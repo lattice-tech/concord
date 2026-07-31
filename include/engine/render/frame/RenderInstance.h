@@ -79,6 +79,21 @@ struct RenderInstance {
     bool hasLocalBounds = false;
     float localMin[3]{0.0f, 0.0f, 0.0f};
     float localMax[3]{0.0f, 0.0f, 0.0f};
+
+    /** Maximum number of discrete detail levels one instance can carry. */
+    static constexpr std::uint32_t kMaxLodLevels = 4;
+
+    /**
+     * Discrete detail levels for this draw, ordered nearest-first. Level 0 is
+     * the full-detail mesh (usually equal to `mesh`); each further level takes
+     * over once the camera is at least `lodStartDistances[level]` world units
+     * away. `lodCount == 0` (the default) means no LOD: `mesh` draws at every
+     * distance, so existing objects are unaffected. Selection happens on the
+     * render thread, where the camera for the target view is known.
+     */
+    std::uint32_t lodCount = 0;
+    MeshHandle lodMeshes[kMaxLodLevels]{};
+    float lodStartDistances[kMaxLodLevels]{0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 } // namespace Concord

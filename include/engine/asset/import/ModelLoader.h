@@ -9,6 +9,8 @@
 
 namespace Concord::Asset {
 
+class CookedModelSource;
+
 /**
  * The high-level entry point for loading a model file.
  *
@@ -26,6 +28,15 @@ public:
      */
     static ImportedModel Import(const std::string& path,
                                 const ImportOptions& options = {});
+
+    /**
+     * Installs (or clears, with nullptr) the cooked package consulted before
+     * live import. When set, Import first asks the source for a cooked model
+     * under `path` and only falls back to the extension-dispatched importers
+     * on a miss. The source must outlive its installation and be swapped from
+     * one thread only.
+     */
+    static void SetCookedSource(const CookedModelSource* source) noexcept;
 };
 
 } // namespace Concord::Asset

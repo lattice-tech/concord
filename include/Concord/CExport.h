@@ -9,7 +9,12 @@
  * selects the export macro below; every other translation unit (the
  * application, or a different module) only ever sees the import macro.
  */
-#if defined(_WIN32)
+#if defined(CONCORD_STATIC_LINK)
+    // Offline tools (e.g. concord-cook) compile engine sources into a static
+    // library or directly into the executable; no DLL boundary exists there.
+    #define CONCORD_DLL_EXPORT
+    #define CONCORD_DLL_IMPORT
+#elif defined(_WIN32)
     #define CONCORD_DLL_EXPORT __declspec(dllexport)
     #define CONCORD_DLL_IMPORT __declspec(dllimport)
 #else

@@ -1,0 +1,63 @@
+# Concord shader build manifest - the single source of truth for which shaders
+# are compiled and how. Consumed by cmake/ConcordShaders.cmake (build graph)
+# and build_shaders.ps1 (manual full rebuild).
+#
+# TAB-separated columns: source	type	varying	defines	outName
+# Use "-" for an empty defines/outName field. outName defaults to the source
+# stem. Compute shaders ignore the varying column (kept for readability).
+vs_mesh.sc	vertex	varying.def.sc	-	-
+fs_mesh.sc	fragment	varying.def.sc	-	-
+vs_particle_billboard.sc	vertex	varying_particle_billboard.def.sc	-	-
+fs_particle_billboard.sc	fragment	varying_particle_billboard.def.sc	-	-
+cs_gpu_particle_simulate.sc	compute	varying_gpu_particle.def.sc	-	-
+vs_gpu_particle_billboard.sc	vertex	varying_gpu_particle.def.sc	-	-
+fs_gpu_particle_billboard.sc	fragment	varying_gpu_particle.def.sc	-	-
+vs_mesh_skinned.sc	vertex	varying_skinned.def.sc	-	-
+vs_shadow.sc	vertex	varying.def.sc	-	-
+vs_shadow_skinned.sc	vertex	varying_skinned.def.sc	-	-
+fs_shadow.sc	fragment	varying.def.sc	-	-
+vs_fullscreen.sc	vertex	varying_present.def.sc	-	-
+fs_fxaa.sc	fragment	varying_present.def.sc	-	-
+vs_sky.sc	vertex	varying_sky.def.sc	-	-
+fs_sky.sc	fragment	varying_sky.def.sc	-	-
+vs_volcloud.sc	vertex	varying_volcloud.def.sc	-	-
+fs_volcloud.sc	fragment	varying_volcloud.def.sc	-	-
+vs_volcloud_composite.sc	vertex	varying_volcloud.def.sc	-	-
+fs_volcloud_composite.sc	fragment	varying_volcloud.def.sc	-	-
+vs_water.sc	vertex	varying_water.def.sc	-	-
+fs_water.sc	fragment	varying_water.def.sc	-	-
+vs_water_bake.sc	vertex	varying_water_bake.def.sc	-	-
+fs_water_bake.sc	fragment	varying_water_bake.def.sc	-	-
+vs_smoke.sc	vertex	varying_smoke.def.sc	-	-
+fs_smoke_march.sc	fragment	varying_smoke.def.sc	SMOKE_MRT=1	fs_smoke_march
+fs_smoke_march.sc	fragment	varying_smoke.def.sc	SMOKE_MRT=0	fs_smoke_march_single
+fs_smoke_composite.sc	fragment	varying_smoke.def.sc	-	-
+vs_bloom.sc	vertex	varying_present.def.sc	-	-
+fs_bloom_down.sc	fragment	varying_present.def.sc	-	-
+fs_bloom_up.sc	fragment	varying_present.def.sc	-	-
+fs_smaa_edges.sc	fragment	varying_present.def.sc	-	-
+fs_smaa_weights.sc	fragment	varying_present.def.sc	-	-
+fs_smaa_blend.sc	fragment	varying_present.def.sc	-	-
+cs_raytrace.sc	compute	varying.def.sc	-	-
+cs_light_cull.sc	compute	varying.def.sc	-	-
+cs_fluid_grid_clear.sc	compute	varying.def.sc	-	-
+cs_fluid_grid_count.sc	compute	varying.def.sc	-	-
+cs_fluid_grid_scan.sc	compute	varying.def.sc	-	-
+cs_fluid_grid_scatter.sc	compute	varying.def.sc	-	-
+cs_fluid_density.sc	compute	varying.def.sc	-	-
+cs_fluid_forces.sc	compute	varying.def.sc	-	-
+cs_fluid_divergence.sc	compute	varying.def.sc	-	-
+cs_fluid_pressure.sc	compute	varying.def.sc	-	-
+cs_fluid_apply.sc	compute	varying.def.sc	-	-
+cs_fluid_integrate.sc	compute	varying.def.sc	-	-
+cs_fluid_finalize.sc	compute	varying.def.sc	-	-
+cs_fluid_field_splat.sc	compute	varying.def.sc	-	-
+cs_fluid_field_smooth.sc	compute	varying.def.sc	-	-
+cs_fluid_mc_voxels.sc	compute	varying.def.sc	-	-
+cs_fluid_mc_triangles.sc	compute	varying.def.sc	-	-
+vs_fluid_surface.sc	vertex	varying_fluid.def.sc	-	-
+fs_fluid_surface.sc	fragment	varying_fluid.def.sc	-	-
+fs_rtresolve.sc	fragment	varying_present.def.sc	-	-
+vs_debugtext.sc	vertex	varying_debugtext.def.sc	-	-
+fs_debugtext.sc	fragment	varying_debugtext.def.sc	-	-
+fs_ui_image.sc	fragment	varying_debugtext.def.sc	-	-

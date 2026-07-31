@@ -1,6 +1,10 @@
 #include "engine/asset/cook/CookCatalog.h"
 #include "engine/asset/cook/CookIo.h"
 #include "engine/asset/cook/CookSession.h"
+#include "engine/asset/cook/ModelCookProducer.h"
+#include "engine/asset/cook/TextureCookProducer.h"
+
+#include "BimgTextureDecode.h"
 #include "engine/asset/id/AssetId.h"
 #include "engine/asset/id/AssetType.h"
 
@@ -23,7 +27,9 @@ using Concord::Asset::CookIo::MakeFilesystemStorage;
 using Concord::Asset::CookIo::ReadFile;
 using Concord::Asset::CookIo::SaveManifest;
 using Concord::Asset::CookSession;
-using Concord::Asset::EncodePassthroughCooked;
+using Concord::Asset::MakeBimgTextureDecode;
+using Concord::Asset::MakeModelCookProduce;
+using Concord::Asset::MakeTextureCookProduce;
 
 constexpr std::uint32_t kCookerVersion = 1;
 
@@ -186,11 +192,13 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // Texture assets decode and bake a full mip chain to CookedTexture; mesh
+    // assets import and bake to CookedModel; everything else (and skinned
+    // models, for now) ships as a passthrough blob.
     CookSession session(std::move(catalog), std::move(*prior), version,
                         MakeFilesystemStorage(),
-                        [](const auto& entry, auto resolved, std::string&) {
-                            return EncodePassthroughCooked(entry, resolved);
-                        },
+                        MakeTextureCookProduce(MakeBimgTextureDecode(),
+                                               MakeModelCookProduce()),
                         outDir);
     const auto result = session.Run();
     if (!result.ok) {

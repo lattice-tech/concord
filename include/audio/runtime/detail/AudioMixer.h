@@ -2,8 +2,9 @@
 #define CONCORD_AUDIOMIXER_H
 
 #include "audio/runtime/AudioListenerState.h"
-#include "audio/runtime/AudioStats.h"
+#include "audio/runtime/detail/AudioStatsBoard.h"
 #include "audio/runtime/AudioRuntimeConfig.h"
+#include "audio/runtime/detail/AudioBusRack.h"
 #include "audio/runtime/detail/AudioClipRegistry.h"
 #include "audio/runtime/detail/AudioMixerState.h"
 #include "audio/runtime/detail/AudioVoicePool.h"
@@ -24,28 +25,26 @@ public:
     void Render(float* interleavedStereo, std::uint32_t frames,
                 const AudioListenerState& listener,
                 const AudioClipRegistry& clips, AudioVoicePool& voices,
-                const AudioMixerState& buses, AudioStats& stats);
+                const AudioMixerState& buses, AudioStatsBoard& stats);
 
 private:
+    /** One-pole low-pass history for one occluded voice. */
+    struct OcclusionState {
+        float left = 0.0f;
+    };
+
     float EffectivePitch(const ActiveVoiceView& voice,
                          const AudioListenerState& listener) const noexcept;
     float DistanceGain(const AudioSourceState& source,
                        const AudioListenerState& listener) const noexcept;
-    float PeakLevel(const float* bus, std::uint32_t frames) const noexcept;
-    float SoftLimit(float sample) const noexcept;
+    float ApplyOcclusion(std::uint64_t voiceKey, float occlusion,
+                         float* mono, std::uint32_t frames) noexcept;
     void AccumulateStereo(const float* stereo, std::uint32_t frames,
                           float gain, float* out) noexcept;
-    void MixBusToMaster(const float* bus, std::uint32_t frames,
-                        float gain, float* out) noexcept;
 
     std::vector<SteamAudioSpatializer> m_spatializers;
     std::vector<float> m_monoScratch;
     std::vector<float> m_stereoScratch;
-    std::vector<float> m_masterScratch;
-    std::vector<float> m_musicScratch;
-    std::vector<float> m_sfxScratch;
-    std::vector<float> m_uiScratch;
-    std::vector<float> m_dialogueScratch;
     std::vector<ActiveVoiceView> m_activeVoices;
     /**
      * Stable voice -> spatializer assignment. HRTF effects carry per-voice
@@ -54,7 +53,9 @@ private:
      * by traversal order made histories switch owners, audible as pops.
      */
     std::unordered_map<std::uint64_t, std::uint32_t> m_spatialAssignments;
+    std::unordered_map<std::uint64_t, OcclusionState> m_occlusionStates;
     std::vector<bool> m_spatialSlotUsed;
+    AudioBusRack m_busRack;
     AudioRuntimeConfig m_config{};
     bool m_initialized = false;
 };

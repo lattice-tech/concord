@@ -9,6 +9,7 @@ namespace Concord::Audio::Detail {
 namespace {
 
 constexpr float kSpeedOfSound = 343.0f;
+constexpr float kPi = 3.14159265358979323846f;
 
 float Dot(const Vector3& lhs, const Vector3& rhs) noexcept
 {
@@ -60,11 +61,10 @@ bool AudioMixer::Init(const AudioRuntimeConfig& config)
     }
     m_monoScratch.resize(static_cast<std::size_t>(config.device.frameSize));
     m_stereoScratch.resize(static_cast<std::size_t>(config.device.frameSize) * 2u);
-    m_masterScratch.resize(static_cast<std::size_t>(config.device.frameSize) * 2u);
-    m_musicScratch.resize(static_cast<std::size_t>(config.device.frameSize) * 2u);
-    m_sfxScratch.resize(static_cast<std::size_t>(config.device.frameSize) * 2u);
-    m_uiScratch.resize(static_cast<std::size_t>(config.device.frameSize) * 2u);
-    m_dialogueScratch.resize(static_cast<std::size_t>(config.device.frameSize) * 2u);
+    if (!m_busRack.Init(config)) {
+        Shutdown();
+        return false;
+    }
     m_initialized = true;
     return true;
 }
@@ -77,14 +77,11 @@ void AudioMixer::Shutdown() noexcept
     m_spatializers.clear();
     m_monoScratch.clear();
     m_stereoScratch.clear();
-    m_masterScratch.clear();
-    m_musicScratch.clear();
-    m_sfxScratch.clear();
-    m_uiScratch.clear();
-    m_dialogueScratch.clear();
     m_activeVoices.clear();
     m_spatialAssignments.clear();
+    m_occlusionStates.clear();
     m_spatialSlotUsed.clear();
+    m_busRack.Shutdown();
     m_config = {};
     m_initialized = false;
 }
@@ -92,21 +89,17 @@ void AudioMixer::Shutdown() noexcept
 void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
                         const AudioListenerState& listener,
                         const AudioClipRegistry& clips, AudioVoicePool& voices,
-                        const AudioMixerState& buses, AudioStats& stats)
+                        const AudioMixerState& buses, AudioStatsBoard& stats)
 {
     if (!m_initialized || interleavedStereo == nullptr || frames == 0) {
         return;
     }
     std::memset(interleavedStereo, 0, static_cast<std::size_t>(frames) * 2u * sizeof(float));
-    std::memset(m_masterScratch.data(), 0, static_cast<std::size_t>(frames) * 2u * sizeof(float));
-    std::memset(m_musicScratch.data(), 0, static_cast<std::size_t>(frames) * 2u * sizeof(float));
-    std::memset(m_sfxScratch.data(), 0, static_cast<std::size_t>(frames) * 2u * sizeof(float));
-    std::memset(m_uiScratch.data(), 0, static_cast<std::size_t>(frames) * 2u * sizeof(float));
-    std::memset(m_dialogueScratch.data(), 0, static_cast<std::size_t>(frames) * 2u * sizeof(float));
-    if (buses.BusMuted(AudioBusId::Master) || buses.BusGain(AudioBusId::Master) <= 0.0f) {
-        stats.peakMaster = 0.0f;
+    if (buses.BusMuted(AudioBusId::Master)) {
+        stats.peakMaster.store(0.0f, std::memory_order_relaxed);
         return;
     }
+    m_busRack.Begin(frames);
 
     voices.CollectActive(m_activeVoices);
     std::stable_sort(m_activeVoices.begin(), m_activeVoices.end(),
@@ -137,6 +130,7 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
             }
         }
         if (!alive) {
+            m_occlusionStates.erase(it->first);
             it = m_spatialAssignments.erase(it);
             continue;
         }
@@ -145,7 +139,6 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
         }
         ++it;
     }
-    float peak = 0.0f;
     for (const ActiveVoiceView& voice : m_activeVoices) {
         const AudioClipDesc* desc = clips.Describe(voice.clip);
         const float* samples = clips.Samples(voice.clip);
@@ -159,36 +152,20 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
         const float pitch = EffectivePitch(voice, listener);
         const std::uint32_t advanceFrames = std::max<std::uint32_t>(
             1u, static_cast<std::uint32_t>(static_cast<float>(frames) * pitch + 0.5f));
-        if (buses.BusMuted(voice.params.bus) || buses.BusGain(voice.params.bus) <= 0.0f) {
+        if (buses.BusMuted(voice.params.bus)) {
             voices.Advance(voice.handle, advanceFrames, desc->frameCount);
             continue;
         }
 
-        const float gain = voice.params.gain * buses.BusGain(AudioBusId::Master)
-            * buses.BusGain(voice.params.bus);
+        // Bus and master gains are applied later by the bus rack, with
+        // ramping; the per-voice stage only bakes the voice's own gain.
+        const float gain = voice.params.gain;
         if (gain <= 0.0f) {
             voices.Advance(voice.handle, advanceFrames, desc->frameCount);
             continue;
         }
 
-        float* busBuffer = m_sfxScratch.data();
-        switch (voice.params.bus) {
-        case AudioBusId::Master:
-            busBuffer = m_masterScratch.data();
-            break;
-        case AudioBusId::Music:
-            busBuffer = m_musicScratch.data();
-            break;
-        case AudioBusId::Sfx:
-            busBuffer = m_sfxScratch.data();
-            break;
-        case AudioBusId::Ui:
-            busBuffer = m_uiScratch.data();
-            break;
-        case AudioBusId::Dialogue:
-            busBuffer = m_dialogueScratch.data();
-            break;
-        }
+        float* busBuffer = m_busRack.Buffer(voice.params.bus);
 
         if (desc->channels == 1) {
             std::fill(m_monoScratch.begin(), m_monoScratch.end(), 0.0f);
@@ -204,6 +181,9 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
                 m_monoScratch[frame] = samples[clipFrame];
             }
             if (voice.params.spatial) {
+                const std::uint64_t key = VoiceKey(voice.handle);
+                const float occlusionGain = ApplyOcclusion(
+                    key, voice.params.source.occlusion, m_monoScratch.data(), frames);
                 SpatialAudioListener spatialListener{};
                 spatialListener.position = listener.position;
                 spatialListener.right = listener.right;
@@ -211,10 +191,10 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
                 spatialListener.forward = listener.forward;
                 SpatialAudioSource spatialSource{};
                 spatialSource.position = voice.params.source.position;
-                spatialSource.gain = voice.params.source.gain * DistanceGain(voice.params.source, listener);
+                spatialSource.gain = voice.params.source.gain * occlusionGain
+                    * DistanceGain(voice.params.source, listener);
                 spatialSource.spatialBlend = voice.params.spatialBlend;
                 std::uint32_t slot = kNoSpatialSlot;
-                const std::uint64_t key = VoiceKey(voice.handle);
                 if (const auto found = m_spatialAssignments.find(key);
                     found != m_spatialAssignments.end()) {
                     slot = found->second;
@@ -270,22 +250,7 @@ void AudioMixer::Render(float* interleavedStereo, std::uint32_t frames,
         voices.Advance(voice.handle, advanceFrames, desc->frameCount);
     }
 
-    MixBusToMaster(m_musicScratch.data(), frames, 1.0f, m_masterScratch.data());
-    MixBusToMaster(m_sfxScratch.data(), frames, 1.0f, m_masterScratch.data());
-    MixBusToMaster(m_uiScratch.data(), frames, 1.0f, m_masterScratch.data());
-    MixBusToMaster(m_dialogueScratch.data(), frames, 1.0f, m_masterScratch.data());
-    MixBusToMaster(m_masterScratch.data(), frames, 1.0f, interleavedStereo);
-
-    stats.peakMusic = PeakLevel(m_musicScratch.data(), frames);
-    stats.peakSfx = PeakLevel(m_sfxScratch.data(), frames);
-    stats.peakUi = PeakLevel(m_uiScratch.data(), frames);
-    stats.peakDialogue = PeakLevel(m_dialogueScratch.data(), frames);
-
-    for (std::uint32_t frame = 0; frame < frames * 2u; ++frame) {
-        interleavedStereo[frame] = SoftLimit(interleavedStereo[frame]);
-        peak = std::max(peak, std::abs(interleavedStereo[frame]));
-    }
-    stats.peakMaster = peak;
+    m_busRack.MixDown(interleavedStereo, frames, buses, stats);
 }
 
 float AudioMixer::EffectivePitch(const ActiveVoiceView& voice,
@@ -351,7 +316,7 @@ float AudioMixer::DistanceGain(const AudioSourceState& source,
              listener.position.z - source.position.z},
             {0.0f, 0.0f, 1.0f});
         const float cosine = std::clamp(Dot(forward, toListener), -1.0f, 1.0f);
-        const float angleDegrees = std::acos(cosine) * (180.0f / 3.14159265358979323846f);
+        const float angleDegrees = std::acos(cosine) * (180.0f / kPi);
         if (angleDegrees >= source.outerConeDegrees * 0.5f) {
             coneGain = source.outerConeGain;
         } else if (angleDegrees > source.innerConeDegrees * 0.5f
@@ -365,41 +330,37 @@ float AudioMixer::DistanceGain(const AudioSourceState& source,
     return std::max(0.0f, distanceGain * coneGain);
 }
 
-float AudioMixer::PeakLevel(const float* bus, std::uint32_t frames) const noexcept
+float AudioMixer::ApplyOcclusion(std::uint64_t voiceKey, float occlusion,
+                                 float* mono, std::uint32_t frames) noexcept
 {
-    float peak = 0.0f;
-    for (std::uint32_t frame = 0; frame < frames * 2u; ++frame) {
-        peak = std::max(peak, std::abs(bus[frame]));
+    if (!std::isfinite(occlusion) || occlusion <= 0.0f) {
+        m_occlusionStates.erase(voiceKey);
+        return 1.0f;
     }
-    return peak;
-}
-
-float AudioMixer::SoftLimit(float sample) const noexcept
-{
-    if (!std::isfinite(sample)) {
-        return 0.0f;
+    const float amount = std::min(occlusion, 1.0f);
+    // Occluded sources lose highs first: sweep a one-pole low-pass from
+    // fully open (~20 kHz) down to a muffled ~500 Hz as occlusion rises,
+    // and shave overall level so a fully blocked source sits well behind
+    // direct ones without vanishing entirely.
+    const float cutoffHz = 20000.0f * std::pow(500.0f / 20000.0f, amount);
+    const float sampleRate = static_cast<float>(m_config.device.sampleRate);
+    const float coefficient = std::exp(-2.0f * kPi * cutoffHz / sampleRate);
+    OcclusionState& state = m_occlusionStates[voiceKey];
+    float history = state.left;
+    for (std::uint32_t frame = 0; frame < frames; ++frame) {
+        history = coefficient * history + (1.0f - coefficient) * mono[frame];
+        mono[frame] = history;
     }
-    if (std::abs(sample) <= 0.95f) {
-        return sample;
-    }
-    const float sign = sample < 0.0f ? -1.0f : 1.0f;
-    const float excess = std::abs(sample) - 0.95f;
-    return sign * (0.95f + std::tanh(excess) * 0.05f);
+    state.left = std::isfinite(history) ? history : 0.0f;
+    return 1.0f - 0.7f * amount;
 }
 
 void AudioMixer::AccumulateStereo(const float* stereo, std::uint32_t frames,
                                   float gain, float* out) noexcept
 {
-    for (std::uint32_t frame = 0; frame < frames * 2u; ++frame) {
-        out[frame] += stereo[frame] * gain;
-    }
-}
-
-void AudioMixer::MixBusToMaster(const float* bus, std::uint32_t frames,
-                                float gain, float* out) noexcept
-{
-    for (std::uint32_t frame = 0; frame < frames * 2u; ++frame) {
-        out[frame] += bus[frame] * gain;
+    for (std::uint32_t frame = 0; frame < frames; ++frame) {
+        out[frame * 2u] += stereo[frame * 2u] * gain;
+        out[frame * 2u + 1u] += stereo[frame * 2u + 1u] * gain;
     }
 }
 
