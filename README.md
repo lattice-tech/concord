@@ -121,6 +121,10 @@ None yet.
 
 None yet.
 
+<br>
+
+[![Star History Chart](https://api.star-history.com/svg?repos=lattice-tech/concord&type=Date)](https://star-history.com/#lattice-tech/concord&Date)
+
 ## Contribution Process
 
 See [CONTRIBUTING.md](.github/CONTRIBUTING.md).
