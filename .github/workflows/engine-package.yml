@@ -7,10 +7,9 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag to name the package (default: workflow branch)"
-        required: false
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -42,7 +41,7 @@ jobs:
       - name: Stage package
         shell: bash
         run: |
-          set -e
+          set -eux
           pkg="$PWD/package"
           mkdir -p "$pkg/include" "$pkg/lib"
 
