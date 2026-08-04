@@ -31,7 +31,7 @@ Concord is a C++23 real-time 3D engine for Windows. Its public API covers render
 
 ## Quick Start
 
-1. Download the latest [concord-cli](https://github.com/simalth-wang/concord-cli) — its GitHub Actions workflow compiles and publishes the CLI automatically on every commit.
+1. Download the latest [concord-cli](https://github.com/simalth-wang/concord-cli).
 2. Create a project. `concord init` downloads the matching prebuilt engine package (DLLs + headers) — published automatically by this repository's `engine-package` workflow on every push — into the project's `lib/` and `include/`, so no engine source checkout is needed:
 
    ```sh
