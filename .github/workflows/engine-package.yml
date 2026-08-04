@@ -25,10 +25,13 @@ jobs:
         with:
           msystem: UCRT64
           update: false
+          # Pin the exact package versions that the engine builds cleanly
+          # with; MSYS2 is rolling and a fresh gcc on a later run can break
+          # the build intermittently.
           install: >-
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gcc=15.2.0-14
 
       - name: Configure
         run: |
