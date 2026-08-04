@@ -6,11 +6,11 @@ $input v_wpos, v_uv, v_surface, v_cascade, v_wave
 // Source: https://github.com/mrdoob/three.js/blob/dev/examples/jsm/objects/Water.js
 // License: MIT (three.js).
 //
-// The original samples a `normalSampler` (waternormals.jpg) four times to build
-// the surface normal. Concord ships no such asset, so getNoise() replaces those
-// four texture fetches with four-octave programmatic hash noise that produces a
-// tangent-space normal (xy = slope, z = up), matching the original's
-// `noise.xzy * vec3(1.5,1.0,1.5)` normal-perturbation contract.
+// The original builds its surface normal from a `normalSampler` (waternormals
+// .jpg) perturbing the geometry. Concord shades the displaced geometry only:
+// the analytic Gerstner normal plus the baked cascade's real displacement
+// slope, so the sun glints are exactly where the wave facets face the half
+// vector and no painted ripple pattern ever appears.
 //
 // The planar reflection is looked up via u_waterPlanarViewProj (the mirrored
 // camera this engine already runs) instead of three.js's textureMatrix, and
@@ -39,12 +39,6 @@ SAMPLER2D(s_waterSceneDepth, 1);
 SAMPLER2D(s_waterPlanar, 2);
 SAMPLER2D(s_waterCascade, 3); // baked wave cascade: RGB displacement, A fold
 
-// --- Programmatic replacement for three.js getNoise (normalSampler fetches) -
-// Returns a tangent-space normal in [-1,1]: xy = horizontal slope, z = up.
-// The original summed four RGBA normal-map samples and returned `noise*0.5-1.0`;
-// we synthesise the same shape from four hash-noise octaves and pack a
-// tangent-space unit normal so downstream `noise.xzy * vec3(1.5,1.0,1.5)`
-// perturbs the surface the way the original did.
 float WaterHash(vec2 p)
 {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -90,26 +84,6 @@ float WaterHeightFbm(vec2 p)
 		amp *= 0.5;
 	}
 	return height;
-}
-
-vec3 getNoise(vec2 uv)
-{
-	float time = u_waterSurface.x;
-	// Domain warp: bend the sampling domain with a low-frequency octave so any
-	// residual lattice alignment is smeared into meandering shapes.
-	float warp = WaterGradNoise(uv * 0.31 + vec2(time * 0.021, -time * 0.017));
-	vec2 warped = uv + vec2(warp, -warp) * 0.9;
-	// Central differences of the height field give a consistent slope pair —
-	// the two channels come from one surface, so the ripples read as connected
-	// chop instead of two unrelated stripe patterns.
-	float eps = 0.22;
-	float hC = WaterHeightFbm(warped);
-	float hX = WaterHeightFbm(warped + vec2(eps, 0.0));
-	float hZ = WaterHeightFbm(warped + vec2(0.0, eps));
-	float nx = clamp((hX - hC) / eps * 0.85, -1.0, 1.0);
-	float nz = clamp((hZ - hC) / eps * 0.85, -1.0, 1.0);
-	float ny = sqrt(max(1.0 - nx * nx - nz * nz, 0.0));
-	return vec3(nx, ny, nz);
 }
 
 // --- Baked wave cascade -----------------------------------------------------
@@ -215,73 +189,95 @@ vec3 UnpackScatteringTint(float packed)
 	return pow(max(srgb, vec3_splat(0.0)), vec3_splat(2.2));
 }
 
-// --- three.js Water.js sunLight, verbatim ---------------------------------
-void sunLight(const vec3 surfaceNormal, const vec3 eyeDirection, float shiny,
-              float spec, float diffuse, inout vec3 diffuseColor, inout vec3 specularColor)
+// --- Physically-based sun lighting (Cook-Torrance / GGX) ------------------
+// three.js's pow() streak is replaced by the micro-facet BRDF: D_GGX spreads
+// the highlight by the surface roughness, Smith G hides it on grazing
+// slopes, Schlick F ties it to the water's Fresnel reflectance (which the
+// composite below already applies). Glints now appear only where the wave
+// facets (Gerstner swells + baked cascade slope inside surfaceNormal) align
+// with the half vector — i.e. along the sun path — and their count, size and
+// intensity follow the actual surface geometry and roughness instead of any
+// added noise mask.
+float D_GGX(float ndh, float alpha)
 {
-	vec3 sunDirection = -normalize(u_waterSunDir.xyz);
-	vec3 reflection = normalize(reflect(-sunDirection, surfaceNormal));
-	float direction = max(0.0, dot(eyeDirection, reflection));
-	specularColor += pow(direction, shiny) * u_waterSunColor.xyz * spec;
-	diffuseColor  += max(dot(sunDirection, surfaceNormal), 0.0) * u_waterSunColor.xyz * diffuse;
+	float a2 = alpha * alpha;
+	float d = ndh * ndh * (a2 - 1.0) + 1.0;
+	return a2 / max(3.14159265 * d * d, 1e-6);
+}
+
+float G_Smith(float ndv, float ndl, float alpha)
+{
+	float k = alpha * 0.5;
+	return ndv / max(ndv * (1.0 - k) + k, 1e-6)
+		* ndl / max(ndl * (1.0 - k) + k, 1e-6);
+}
+
+void sunLight(const vec3 surfaceNormal, const vec3 eyeDirection,
+              inout vec3 diffuseColor, inout vec3 specularColor)
+{
+	vec3 lightDir = normalize(u_waterSunDir.xyz);
+	float ndl = max(dot(surfaceNormal, lightDir), 0.0);
+	diffuseColor += ndl * u_waterSunColor.xyz * 0.12;
+	if (ndl <= 0.0) {
+		return;
+	}
+	vec3 halfVec = normalize(lightDir + eyeDirection);
+	float ndh = max(dot(surfaceNormal, halfVec), 0.0);
+	float ndv = max(dot(surfaceNormal, eyeDirection), 1e-4);
+	if (ndh <= 0.0) {
+		return;
+	}
+	float alpha = max(u_waterOptics.x, 0.01);
+	float d = D_GGX(ndh, alpha);
+	float g = G_Smith(ndv, ndl, alpha);
+	// Water F0 ≈ 0.02; Schlick over the view angle. With a planar reflection
+	// bound, the reflection sample and this specular together form the real
+	// water surface response, so no extra brightness weight is applied.
+	float f = 0.02 + (0.82 - 0.02) * pow(1.0 - ndv, 5.0);
+	specularColor += d * g * f / max(4.0 * ndv * ndl, 1e-6)
+		* u_waterSunColor.xyz;
 }
 
 void main()
 {
-	float size = max(u_waterOptics.x, 0.0001);
-	// Three.js: `vec4 noise = getNoise(worldPosition.xz * size)` then
-	// `surfaceNormal = normalize(noise.xzy * vec3(1.5,1.0,1.5))`.
-	// World-space coordinates drive the noise, as in the original, so the
-	// ripple frequency is independent of the authored surface extent. The
-	// ripple normal then perturbs the analytic Gerstner normal from the
-	// vertex stage, so both the swells and the fine ripples shade.
-	// Two ripple octaves: a broad swell-scale layer plus a fine close-up layer,
-	// so the surface keeps detail when the camera is near it.
 	float viewDist = length(u_waterCamera.xyz - v_wpos.xyz);
-	vec3 noiseCoarse = getNoise(v_wpos.xz * size * 3.0);
-	vec3 noiseFine = getNoise(v_wpos.xz * size * 14.0 + vec2(37.0, 91.0));
-	// The fine layer fades with distance on its own — its wavelength drops
-	// under a pixel long before the coarse layer's does, so fading it early
-	// kills the aliasing shimmer without flattening the whole far field.
-	float fineFade = 1.0 - smoothstep(15.0, 90.0, viewDist);
-	// With the baked cascade carrying the real spectrum detail, the procedural
-	// ripple layer steps back to a fine close-up shimmer only.
+	// Surface normal comes from the displaced geometry only: the analytic
+	// Gerstner swells (WaveNormal) plus the baked cascade slope (real spectrum
+	// displacement). No ripple map or noise layer is stacked on top — the
+	// sun's glints are exactly where the wave facets face the half vector, so
+	// the highlight follows the actual surface and reads as water, not as a
+	// painted pattern.
 	float cascadeOn = u_waterPlanarParams.z;
-	vec3 noise = normalize(noiseCoarse * mix(1.0, 0.45, cascadeOn)
-		+ noiseFine * (0.45 * fineFade));
-	vec3 rippleNormal = normalize(noise.xzy * vec3(1.5, 1.0, 1.5));
 	vec3 waveNormal = WaveNormal(v_wpos.xz);
 	vec3 cascadeDetail = vec3(0.0, 0.0, 0.0);
 	if (cascadeOn > 0.5) {
 		cascadeDetail = CascadeDetail(v_wpos.xz);
 		// The baked slope carries every band the texels can represent, from
 		// ground swell to capillary chop, so it perturbs the analytic normal
-		// the way the removed procedural octaves used to — but with content
-		// that matches the displaced field instead of unrelated hash noise.
-		waveNormal = normalize(vec3(waveNormal.x - cascadeDetail.x * 0.8, 1.0,
-		                            waveNormal.z - cascadeDetail.y * 0.8));
+		// with content that matches the displaced field.
+		waveNormal = normalize(vec3(waveNormal.x - cascadeDetail.x * 0.5, 1.0,
+		                            waveNormal.z - cascadeDetail.y * 0.5));
 	}
 	// Distant water still calms toward the plane normal so the horizon mirrors
 	// the sky, but keeps enough chop that its specular stays broken up instead
 	// of collapsing into a clean geometric sun streak.
 	float flatten = smoothstep(40.0, 320.0, viewDist);
-	vec3 surfaceNormal = normalize(waveNormal + vec3(rippleNormal.x, 0.0, rippleNormal.z) * 0.55);
-	surfaceNormal = normalize(mix(surfaceNormal, vec3(0.0, 1.0, 0.0), flatten * 0.7));
+	vec3 surfaceNormal = normalize(mix(waveNormal, vec3(0.0, 1.0, 0.0), flatten * 0.7));
 
 	vec3 diffuseLight = vec3(0.0);
 	vec3 specularLight = vec3(0.0);
 	vec3 worldToEye = u_waterCamera.xyz - v_wpos.xyz;
 	vec3 eyeDirection = normalize(worldToEye);
-	sunLight(surfaceNormal, eyeDirection, 240.0, 1.0, 0.12, diffuseLight, specularLight);
+	sunLight(surfaceNormal, eyeDirection, diffuseLight, specularLight);
 	// The glint control scales the sun's specular streak; without it a low sun
 	// paints the whole mid-distance in its colour instead of a sun path.
 	specularLight *= clamp(u_waterAdvanced.z, 0.0, 2.0) * clamp(u_waterSunDir.w, 0.0, 1.5);
-	// Glitter break-up: real sun paths are a shimmer of discrete facets, not a
-	// continuous polished stripe. A fast independent noise field modulates the
-	// specular so the streak sparkles and never repeats along the wave rows.
-	float sparkle = WaterGradNoise(v_wpos.xz * size * 26.0
-		+ vec2(u_waterSurface.x * 1.7, -u_waterSurface.x * 1.3));
-	specularLight *= 0.55 + 0.9 * smoothstep(-0.25, 0.55, sparkle);
+	// No independent glitter mask: the sun glints above are the micro-facet
+	// field itself catching the light — the GGX distribution aligns only
+	// where the wave facets (Gerstner swells + baked cascade slope in
+	// surfaceNormal) face the half vector, so the glints cluster along the
+	// sun path and ride the waves. An extra noise mask would sprinkle random
+	// bright specks over the whole surface, which is what reads as fake.
 
 	float distance = length(worldToEye);
 	float distScale = clamp(u_waterOptics.y, 0.05, 1.5);

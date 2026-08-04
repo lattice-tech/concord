@@ -1,0 +1,9 @@
+# GitHub linguist overrides.
+#
+# Headers carry the .h extension even though they are C++ (see AGENTS.md §2);
+# without this GitHub counts them as C. Force the classifier.
+*.h linguist-language=C++
+
+# bgfx shader sources (.sc) are GLSL dialects compiled to SPIR-V by shaderc;
+# linguist has no bgfx language, so classify them as GLSL.
+*.sc linguist-language=GLSL

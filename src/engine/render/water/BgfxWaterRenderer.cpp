@@ -161,7 +161,8 @@ bool BgfxWaterRenderer::EnsureReady()
         && bgfx::isValid(m_uPlanarParams) && bgfx::isValid(m_sPlanar)
         && bgfx::isValid(m_uCascadeParams) && bgfx::isValid(m_uTile)
         && bgfx::isValid(m_uWaveA) && bgfx::isValid(m_uWaveB)
-        && bgfx::isValid(m_sCascade) && m_cascade.EnsureReady()
+        && bgfx::isValid(m_sCascade)
+        && m_cascade.EnsureReady()
         && m_clipmap.EnsureReady() && m_grids.EnsureReady();
     if (!m_ready) {
         Debug::Logger::Error("Render", "water pass resource init failed");
