@@ -102,10 +102,12 @@ jobs:
         run: |
           # Every push to main refreshes the "latest" pre-release with the
           # freshest build. Update in place when it exists (no delete/create
-          # race), otherwise create it.
+          # race), otherwise create it. Never fails the job: the tagged
+          # release is the primary package source.
+          set -x
           if gh release view latest >/dev/null 2>&1; then
-            gh release upload latest concord-windows-latest.zip --clobber
+            gh release upload latest concord-windows-latest.zip --clobber || true
           else
             gh release create latest concord-windows-latest.zip \
-              --title "Latest build" --prerelease
+              --title "Latest build" --prerelease || true
           fi
