@@ -1,6 +1,7 @@
 #include "engine/app/Game.h"
 
 #include "engine/app/ConfigLocator.h"
+#include "engine/app/ConsoleHost.h"
 #include "engine/app/GameConfigLoader.h"
 #include "engine/debug/Logger.h"
 #include "engine/render/postprocess/AntiAliasing.h"
@@ -13,6 +14,10 @@ Game::Game(const GameConfig& fallbackConfig, const std::string& configPath)
     : m_config(GameConfigLoader::LoadFromFile(ConfigLocator::Resolve(configPath), fallbackConfig))
     , m_loop(EngineLoop::Acquire(m_config.renderBackend))
 {
+    // Apply the console policy before any subsystem logs: Release runs hide
+    // the stub console a console-subsystem exe opens, Debug runs keep the
+    // launching terminal or allocate a log console when launched without one.
+    ApplyConsolePolicy(m_config.mode);
 }
 
 Game::~Game()

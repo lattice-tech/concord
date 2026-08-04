@@ -10,6 +10,7 @@
  */
 
 #include "engine/app/ConfigLocator.h"
+#include "engine/app/ConsoleHost.h"
 #include "engine/app/Game.h"
 #include "engine/app/GameConfig.h"
 #include "engine/render/postprocess/AntiAliasing.h"
