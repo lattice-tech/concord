@@ -100,10 +100,12 @@ jobs:
         if: github.ref_type != 'tag'
         shell: bash
         run: |
-          # Every push to main rebuilds and force-updates the "latest" tag, so
-          # `concord init` (no version) always pulls the freshest build.
-          # --cleanup-tag also drops the leftover tag, otherwise
-          # `gh release create` fails on the existing one.
-          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest concord-windows-latest.zip \
-            --title "Latest build" --prerelease
+          # Every push to main refreshes the "latest" pre-release with the
+          # freshest build. Update in place when it exists (no delete/create
+          # race), otherwise create it.
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest concord-windows-latest.zip --clobber
+          else
+            gh release create latest concord-windows-latest.zip \
+              --title "Latest build" --prerelease
+          fi
