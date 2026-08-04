@@ -31,7 +31,7 @@ Concord is a C++23 real-time 3D engine for Windows. Its public API covers render
 
 ## Quick Start
 
-1. Download the latest [concord-cli](https://github.com/simalth-wang/concord-cli).
+1. Download the latest [concord-cli](https://github.com/lattice-tech/concord-cli).
 2. Create a project. `concord init` downloads the matching prebuilt engine package (DLLs + headers) into the project's `lib/` and `include/`, so no engine source checkout is needed:
 
    ```sh
@@ -40,7 +40,7 @@ Concord is a C++23 real-time 3D engine for Windows. Its public API covers render
    concord run
    ```
 
-3. See the [concord-cli README](https://github.com/simalth-wang/concord-cli) for all commands and options.
+3. See the [concord-cli README](https://github.com/lattice-tech/concord-cli) for all commands and options.
 
 ## Usage
 

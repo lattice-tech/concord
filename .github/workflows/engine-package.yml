@@ -102,6 +102,8 @@ jobs:
         run: |
           # Every push to main rebuilds and force-updates the "latest" tag, so
           # `concord init` (no version) always pulls the freshest build.
-          gh release delete latest --yes 2>/dev/null || true
+          # --cleanup-tag also drops the leftover tag, otherwise
+          # `gh release create` fails on the existing one.
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
           gh release create latest concord-windows-latest.zip \
             --title "Latest build" --prerelease

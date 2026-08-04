@@ -31,7 +31,7 @@ Concord 是一款面向 Windows 的 C++23 即時 3D 引擎。公開 API 涵蓋�
 
 ## 快速開始
 
-1. 下載最新的 [concord-cli](https://github.com/simalth-wang/concord-cli)。
+1. 下載最新的 [concord-cli](https://github.com/lattice-tech/concord-cli)。
 2. 建立專案。`concord init` 會把預編譯引擎套件（DLL + 標頭檔）下載到專案的 `lib/` 和 `include/`，無需檢出引擎原始碼：
 
    ```sh
@@ -40,7 +40,7 @@ Concord 是一款面向 Windows 的 C++23 即時 3D 引擎。公開 API 涵蓋�
    concord run
    ```
 
-3. 所有命令和選項請參閱 [concord-cli README](https://github.com/simalth-wang/concord-cli)。
+3. 所有命令和選項請參閱 [concord-cli README](https://github.com/lattice-tech/concord-cli)。
 
 ## 使用範例
 
