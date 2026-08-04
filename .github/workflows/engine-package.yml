@@ -1,0 +1,105 @@
+name: engine-package
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to name the package (default: workflow branch)"
+        required: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MinGW toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-gcc
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF
+
+      - name: Build engine DLLs
+        run: cmake --build build --target CEngine CAudio CGUI CTime CSystem --parallel
+
+      - name: Stage package
+        shell: bash
+        run: |
+          set -e
+          pkg="$PWD/package"
+          mkdir -p "$pkg/include" "$pkg/lib"
+
+          # Public headers: the whole include tree, because the Concord/*
+          # facade headers forward into module-private headers.
+          cp -r include/* "$pkg/include/"
+
+          # Engine DLLs and import libraries produced by the build.
+          cp build/concord/runtime/*.dll "$pkg/lib/"
+          find build -name "libCEngine.dll.a" -o -name "libCAudio.dll.a" \
+            -o -name "libCGUI.dll.a" -o -name "libCTime.dll.a" \
+            -o -name "libCSystem.dll.a" | while read -r implib; do
+            cp "$implib" "$pkg/lib/"
+          done
+
+          # Vendored runtime DLLs and import libraries from the repo.
+          cp lib/SDL3.dll lib/phonon.dll lib/TrueAudioNext.dll "$pkg/lib/" 2>/dev/null || true
+          cp lib/libSDL3.dll.a lib/phonon.lib "$pkg/lib/" 2>/dev/null || true
+
+          # MinGW compiler runtime the DLLs need next to them.
+          cp "$(dirname "$(command -v g++)")"/libgcc_s_seh-1.dll \
+             "$(dirname "$(command -v g++)")"/libstdc++-6.dll \
+             "$(dirname "$(command -v g++)")"/libwinpthread-1.dll "$pkg/lib/"
+
+      - name: Pack zip
+        shell: powershell
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+            $stripped = $tag.TrimStart('v')
+            if (-not $stripped) { $stripped = '0.1.0-beta' }
+            $zip = "concord-windows-v$stripped.zip"
+          } else {
+            $zip = "concord-windows-latest.zip"
+          }
+          Compress-Archive -Path package/* -DestinationPath $zip -CompressionLevel Optimal
+          Get-ChildItem -Name *.zip
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: concord-windows-engine
+          path: concord-windows-*.zip
+
+      - name: Publish tag release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: concord-windows-*.zip
+          generate_release_notes: true
+
+      - name: Publish latest build release
+        if: github.ref_type != 'tag'
+        shell: bash
+        run: |
+          # Every push to main rebuilds and force-updates the "latest" tag, so
+          # `concord init` (no version) always pulls the freshest build.
+          gh release delete latest --yes 2>/dev/null || true
+          gh release create latest concord-windows-latest.zip \
+            --title "Latest build" --prerelease
