@@ -50,8 +50,11 @@ jobs:
           # facade headers forward into module-private headers.
           cp -r include/* "$pkg/include/"
 
-          # Engine DLLs and import libraries produced by the build.
-          cp build/concord/runtime/*.dll "$pkg/lib/"
+          # Engine DLLs and import libraries produced by the build. The repo
+          # is configured directly (cmake -S .), so runtime output lands in
+          # build/runtime/ — not build/concord/runtime/ (that layout only
+          # happens when the repo is added via add_subdirectory).
+          cp build/runtime/*.dll "$pkg/lib/"
           find build -name "libCEngine.dll.a" -o -name "libCAudio.dll.a" \
             -o -name "libCGUI.dll.a" -o -name "libCTime.dll.a" \
             -o -name "libCSystem.dll.a" | while read -r implib; do
