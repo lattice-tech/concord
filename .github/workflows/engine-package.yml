@@ -52,6 +52,11 @@ jobs:
           # facade headers forward into module-private headers.
           cp -r include/* "$pkg/include/"
 
+          # The repo-root version file travels inside the package so the
+          # concord-cli engine cache can identify a downloaded package's
+          # version without touching the network.
+          cp version "$pkg/include/version"
+
           # Engine DLLs and import libraries produced by the build. The repo
           # is configured directly (cmake -S .), so runtime output lands in
           # build/runtime/ — not build/concord/runtime/ (that layout only
