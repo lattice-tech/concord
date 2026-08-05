@@ -25,13 +25,14 @@ jobs:
         with:
           msystem: UCRT64
           update: false
-          # Pin the exact package versions that the engine builds cleanly
-          # with; MSYS2 is rolling and a fresh gcc on a later run can break
-          # the build intermittently.
+          # MSYS2 is rolling: concrete version pins go stale as soon as the
+          # repos drop the old build ('target not found' fails the whole
+          # run), so gcc stays unpinned and the current release is used.
+          # A gcc bump that breaks the build shows up here immediately.
           install: >-
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-gcc=16.1.0-6
+            mingw-w64-ucrt-x86_64-gcc
 
       - name: Configure
         run: |
