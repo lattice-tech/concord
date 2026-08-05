@@ -31,7 +31,7 @@ jobs:
           install: >-
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-gcc=15.2.0-14
+            mingw-w64-ucrt-x86_64-gcc=16.1.0-6
 
       - name: Configure
         run: |
