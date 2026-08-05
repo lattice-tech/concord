@@ -1,11 +1,11 @@
 #ifndef CONCORD_SKELETALSTATE_H
 #define CONCORD_SKELETALSTATE_H
 
-#include "engine/animation/AnimationParameters.h"
-#include "engine/animation/PlaybackMode.h"
-#include "engine/animation/SkeletalBlend.h"
-#include "engine/animation/SkeletalClip.h"
-#include "engine/animation/Skeleton.h"
+#include "engine/animation/state/AnimationParameters.h"
+#include "engine/animation/clip/PlaybackMode.h"
+#include "engine/animation/blend/SkeletalBlend.h"
+#include "engine/animation/clip/SkeletalClip.h"
+#include "engine/animation/skeleton/Skeleton.h"
 
 #include <string>
 

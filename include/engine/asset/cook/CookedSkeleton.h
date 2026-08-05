@@ -1,7 +1,7 @@
 #ifndef CONCORD_COOKEDSKELETON_H
 #define CONCORD_COOKEDSKELETON_H
 
-#include "engine/animation/Skeleton.h"
+#include "engine/animation/skeleton/Skeleton.h"
 
 #include <cstddef>
 #include <cstdint>

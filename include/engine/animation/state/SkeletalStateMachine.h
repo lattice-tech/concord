@@ -2,13 +2,17 @@
 #define CONCORD_SKELETALSTATEMACHINE_H
 
 #include "Concord/CExport.h"
-#include "engine/animation/AnimationParameters.h"
-#include "engine/animation/AnimationTransition.h"
-#include "engine/animation/PlaybackMode.h"
-#include "engine/animation/SkeletalBlend.h"
-#include "engine/animation/SkeletalState.h"
-#include "engine/animation/Skeleton.h"
+#include "engine/animation/state/AnimationParameters.h"
+#include "engine/animation/state/AnimationTransition.h"
+#include "engine/animation/clip/PlaybackMode.h"
+#include "engine/animation/clip/SkeletalEventSampler.h"
+#include "engine/animation/clip/SyncTrack.h"
+#include "engine/animation/blend/SkeletalBlend.h"
+#include "engine/animation/state/SkeletalState.h"
+#include "engine/animation/skeleton/Skeleton.h"
+#include "engine/motion/Easing.h"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -59,7 +63,10 @@ public:
 
     /** Adds a transition (empty @p from = any state); conditions ANDed. */
     void AddTransition(const std::string& from, const std::string& to,
-                       std::vector<TransitionCondition> conditions, float duration = 0.15f);
+                       std::vector<TransitionCondition> conditions,
+                       float duration = 0.15f,
+                       Motion::Easing blendEasing = Motion::Easing::Linear,
+                       std::string syncName = {});
 
     /** Sets the state the machine starts in. */
     void SetEntry(const std::string& name);
@@ -69,6 +76,34 @@ public:
 
     /** Advances the machine and applies the blended pose to the target SkinnedModel. */
     void Update(float deltaTime);
+
+    /**
+     * @brief Advances the machine and samples the blended pose into @p out.
+     *
+     * The same evaluation as Update, but without applying the result to the
+     * target model — used by SkeletalAnimator, which composes layers on top.
+     * Requires a target (it supplies the skeleton); nothing is written to it.
+     */
+    void Sample(float deltaTime, SkeletonPose& out);
+
+    /**
+     * @brief Registers a callback for the current single-clip state's events.
+     *
+     * Markers on the state's clip fire as the machine's clock crosses them
+     * (honouring direction and wrap; see SkeletalEventSampler). Blend-space
+     * states fire nothing. Only one callback is stored.
+     */
+    void SetEventCallback(std::function<void(const SkeletalEvent&)> callback);
+
+    /**
+     * @brief Programmatically switches to @p name, bypassing conditions.
+     *
+     * With @p crossfadeSeconds <= 0 the switch is instant; otherwise the
+     * machine crossfades to the new state over that duration (used by
+     * actions that jump straight to an attack state, e.g. from game code).
+     * @return false when no state has that name; the machine is unchanged.
+     */
+    bool SetState(const std::string& name, float crossfadeSeconds = 0.0f);
 
     /** Name of the current state (the crossfade target while transitioning). */
     const std::string& CurrentState() const;
@@ -93,6 +128,12 @@ private:
     float m_nextTime = 0.0f;
     float m_blendElapsed = 0.0f;
     float m_blendDuration = 0.0f;
+    /** Blend curve and sync marker of the transition currently fading. */
+    Motion::Easing m_transitionEasing = Motion::Easing::Linear;
+    std::string m_transitionSyncName;
+    SkeletalEventSampler m_eventSampler;
+    /** Direction of the current state's PingPong playback (reset on switch). */
+    bool m_pingPongReversing = false;
 
     // Scratch poses reused across frames to avoid per-frame allocation.
     SkeletonPose m_poseA;

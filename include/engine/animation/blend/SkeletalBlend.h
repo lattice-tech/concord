@@ -1,11 +1,13 @@
 #ifndef CONCORD_SKELETALBLEND_H
 #define CONCORD_SKELETALBLEND_H
 
-#include "engine/animation/AnimationTrack.h"
-#include "engine/animation/SkeletalClip.h"
-#include "engine/animation/Skeleton.h"
+#include "engine/animation/clip/AnimationTrack.h"
+#include "engine/animation/clip/SkeletalClip.h"
+#include "engine/animation/clip/SyncTrack.h"
+#include "engine/animation/skeleton/Skeleton.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <vector>
 
 namespace Concord::Animation {
@@ -74,16 +76,107 @@ public:
      */
     void Sample(float value, float phase, const Skeleton& skeleton, SkeletonPose& out) const
     {
+        SampleImpl(value, phase, skeleton, out, nullptr);
+    }
+
+    /**
+     * @brief Like Sample, but aligns the blended clips through @p syncName.
+     *
+     * The first entry's clip drives a master timeline (its time is
+     * `phase * duration`); every other clip's sample time is mapped onto it
+     * through the shared marker (SyncTrack::MapTime), so footfalls stay
+     * together across clips of different lengths. Falls back to plain phase
+     * sampling when the marker is missing on either side.
+     */
+    void SampleSynced(float value, float phase, const std::string& syncName,
+                      const Skeleton& skeleton, SkeletonPose& out) const
+    {
+        SampleImpl(value, phase, skeleton, out, &syncName);
+    }
+
+private:
+    struct Entry {
+        float axis = 0.0f;
+        const SkeletalClip* clip = nullptr;
+    };
+
+    static void SampleEntryAt(const Entry& e, float time, const Skeleton& skeleton,
+                              SkeletonPose& out)
+    {
+        if (e.clip == nullptr) {
+            out = skeleton.BindPose();
+            return;
+        }
+        e.clip->Sample(time, skeleton, out);
+    }
+
+    /** Phase-scaled sample time for an entry (0 for a null clip). */
+    static float PhaseTime(const Entry& e, float clampedPhase)
+    {
+        return e.clip != nullptr ? clampedPhase * e.clip->Duration() : 0.0f;
+    }
+
+    void SampleImpl(float value, float phase, const Skeleton& skeleton,
+                    SkeletonPose& out, const std::string* syncName) const
+    {
         if (m_entries.empty()) {
             out = skeleton.BindPose();
             return;
         }
+        if (syncName == nullptr) {
+            // Plain phase path: allocation-free, as before.
+            const float clamped = phase < 0.0f ? 0.0f : (phase > 1.0f ? 1.0f : phase);
+            if (m_entries.size() == 1 || value <= m_entries.front().axis) {
+                SampleEntryAt(m_entries.front(), PhaseTime(m_entries.front(), clamped),
+                              skeleton, out);
+                return;
+            }
+            if (value >= m_entries.back().axis) {
+                SampleEntryAt(m_entries.back(), PhaseTime(m_entries.back(), clamped),
+                              skeleton, out);
+                return;
+            }
+            std::size_t i = 0;
+            while (i + 1 < m_entries.size() && m_entries[i + 1].axis <= value) {
+                ++i;
+            }
+            const Entry& a = m_entries[i];
+            const Entry& b = m_entries[i + 1];
+            const float span = b.axis - a.axis;
+            const float t = span > 1e-6f ? (value - a.axis) / span : 0.0f;
+            SkeletonPose poseA;
+            SkeletonPose poseB;
+            SampleEntryAt(a, PhaseTime(a, clamped), skeleton, poseA);
+            SampleEntryAt(b, PhaseTime(b, clamped), skeleton, poseB);
+            BlendSkeletonPose(poseA, poseB, t, out);
+            return;
+        }
+
+        // Synced path: the first entry drives a master timeline; every other
+        // clip's sample time maps onto it through the shared marker.
+        const float clampedPhase = phase < 0.0f ? 0.0f : (phase > 1.0f ? 1.0f : phase);
+        std::vector<float> times(m_entries.size(), 0.0f);
+        for (std::size_t i = 0; i < m_entries.size(); ++i) {
+            const SkeletalClip* clip = m_entries[i].clip;
+            if (clip == nullptr) {
+                continue;
+            }
+            const SkeletalClip* master = m_entries.front().clip;
+            if (i == 0 || master == nullptr) {
+                times[i] = clampedPhase * clip->Duration();
+                continue;
+            }
+            times[i] = SyncTrack::MapTime(clampedPhase * master->Duration(),
+                                          master->sync, clip->sync, *syncName,
+                                          master->Duration(), clip->Duration());
+        }
+
         if (m_entries.size() == 1 || value <= m_entries.front().axis) {
-            SampleEntry(m_entries.front(), phase, skeleton, out);
+            SampleEntryAt(m_entries.front(), times.front(), skeleton, out);
             return;
         }
         if (value >= m_entries.back().axis) {
-            SampleEntry(m_entries.back(), phase, skeleton, out);
+            SampleEntryAt(m_entries.back(), times.back(), skeleton, out);
             return;
         }
         std::size_t i = 0;
@@ -96,25 +189,9 @@ public:
         const float t = span > 1e-6f ? (value - a.axis) / span : 0.0f;
         SkeletonPose poseA;
         SkeletonPose poseB;
-        SampleEntry(a, phase, skeleton, poseA);
-        SampleEntry(b, phase, skeleton, poseB);
+        SampleEntryAt(a, times[i], skeleton, poseA);
+        SampleEntryAt(b, times[i + 1], skeleton, poseB);
         BlendSkeletonPose(poseA, poseB, t, out);
-    }
-
-private:
-    struct Entry {
-        float axis = 0.0f;
-        const SkeletalClip* clip = nullptr;
-    };
-
-    static void SampleEntry(const Entry& e, float phase, const Skeleton& skeleton, SkeletonPose& out)
-    {
-        if (e.clip == nullptr) {
-            out = skeleton.BindPose();
-            return;
-        }
-        const float clamped = phase < 0.0f ? 0.0f : (phase > 1.0f ? 1.0f : phase);
-        e.clip->Sample(clamped * e.clip->Duration(), skeleton, out);
     }
 
     std::vector<Entry> m_entries;

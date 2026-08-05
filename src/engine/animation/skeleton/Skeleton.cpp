@@ -1,4 +1,4 @@
-#include "engine/animation/Skeleton.h"
+#include "engine/animation/skeleton/Skeleton.h"
 
 namespace Concord::Animation {
 
@@ -20,6 +20,25 @@ SkeletonPose Skeleton::BindPose() const
         pose.local.push_back(bone.bindLocal);
     }
     return pose;
+}
+
+bool Skeleton::ChainToRoot(int boneIndex, std::vector<int>& out) const
+{
+    out.clear();
+    if (boneIndex < 0 || boneIndex >= static_cast<int>(bones.size())) {
+        return false;
+    }
+    int current = boneIndex;
+    std::size_t guard = bones.size() + 1;
+    while (current >= 0) {
+        if (guard-- == 0 || current >= static_cast<int>(bones.size())) {
+            out.clear();
+            return false;
+        }
+        out.push_back(current);
+        current = bones[static_cast<std::size_t>(current)].parent;
+    }
+    return true;
 }
 
 namespace {
@@ -51,7 +70,36 @@ void ResolveGlobal(std::size_t i, const std::vector<Bone>& bones,
     }
 }
 
+bool ResolveAllGlobals(const std::vector<Bone>& bones, const SkeletonPose& pose,
+                       const Matrix4& rootTransform, std::vector<Matrix4>& outGlobal)
+{
+    const std::size_t count = bones.size();
+    if (count == 0 || pose.local.size() != count) {
+        return false;
+    }
+    outGlobal.resize(count);
+    std::vector<char> done(count, 0);
+    for (std::size_t i = 0; i < count; ++i) {
+        ResolveGlobal(i, bones, pose, outGlobal, done, rootTransform);
+    }
+    return true;
+}
+
 } // namespace
+
+bool Skeleton::ComputeBoneWorld(const SkeletonPose& pose, int boneIndex,
+                                Matrix4& out) const
+{
+    if (boneIndex < 0 || boneIndex >= static_cast<int>(bones.size())) {
+        return false;
+    }
+    std::vector<Matrix4> global;
+    if (!ResolveAllGlobals(bones, pose, rootTransform, global)) {
+        return false;
+    }
+    out = global[static_cast<std::size_t>(boneIndex)];
+    return true;
+}
 
 void Skeleton::ComputePalette(const SkeletonPose& pose, std::vector<Matrix4>& outPalette) const
 {
@@ -61,10 +109,10 @@ void Skeleton::ComputePalette(const SkeletonPose& pose, std::vector<Matrix4>& ou
         return;
     }
 
-    std::vector<Matrix4> global(count);
-    std::vector<char> done(count, 0);
-    for (std::size_t i = 0; i < count; ++i) {
-        ResolveGlobal(i, bones, pose, global, done, rootTransform);
+    std::vector<Matrix4> global;
+    if (!ResolveAllGlobals(bones, pose, rootTransform, global)) {
+        outPalette.clear();
+        return;
     }
     for (std::size_t i = 0; i < count; ++i) {
         outPalette[i] = Matrix4::Multiply(global[i], bones[i].inverseBind);

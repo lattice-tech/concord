@@ -79,11 +79,13 @@ inline bool AffineInvert(const float m[16], float out[16]) noexcept
     out[10] = (a * e - b * d) * inverseDeterminant;
     out[11] = 0.0f;
 
-    // Inverse translation: -(basis^-1) * translation.
+    // Inverse translation: -(basis^-1) * translation. The translation of the
+    // inverse is -A^-1 * t, and A^-1 is written row-major into out, so the
+    // dot products below read out's *rows* (out[0..2], out[4..6], out[8..10]).
     const Vector3 translation{m[12], m[13], m[14]};
-    out[12] = -(out[0] * translation.x + out[4] * translation.y + out[8] * translation.z);
-    out[13] = -(out[1] * translation.x + out[5] * translation.y + out[9] * translation.z);
-    out[14] = -(out[2] * translation.x + out[6] * translation.y + out[10] * translation.z);
+    out[12] = -(out[0] * translation.x + out[1] * translation.y + out[2] * translation.z);
+    out[13] = -(out[4] * translation.x + out[5] * translation.y + out[6] * translation.z);
+    out[14] = -(out[8] * translation.x + out[9] * translation.y + out[10] * translation.z);
     out[15] = 1.0f;
     return true;
 }

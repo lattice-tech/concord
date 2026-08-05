@@ -1,5 +1,6 @@
-#include "engine/animation/AnimStateMachine.h"
+#include "engine/animation/state/AnimStateMachine.h"
 
+#include "engine/animation/clip/SyncTrack.h"
 #include "engine/object/Node.h"
 
 #include <cmath>
@@ -30,13 +31,17 @@ void AnimStateMachine::AddBlendState(const std::string& name, const BlendSpace1D
 }
 
 void AnimStateMachine::AddTransition(const std::string& from, const std::string& to,
-                                     std::vector<TransitionCondition> conditions, float duration)
+                                     std::vector<TransitionCondition> conditions,
+                                     float duration, Motion::Easing blendEasing,
+                                     std::string syncName)
 {
     AnimationTransition transition;
     transition.from = from;
     transition.to = to;
     transition.conditions = std::move(conditions);
     transition.duration = duration;
+    transition.blendEasing = blendEasing;
+    transition.syncName = std::move(syncName);
     m_transitions.push_back(std::move(transition));
 }
 
@@ -145,6 +150,8 @@ void AnimStateMachine::Update(float deltaTime)
                     m_nextTime = 0.0f;
                     m_blendElapsed = 0.0f;
                     m_blendDuration = tr.duration;
+                    m_transitionEasing = tr.blendEasing;
+                    m_transitionSyncName = tr.syncName;
                 }
             }
         }
@@ -157,11 +164,22 @@ void AnimStateMachine::Update(float deltaTime)
 
     if (m_transitioning && m_next >= 0) {
         AnimationState& nxt = m_states[m_next];
-        m_nextTime = WrapTime(m_nextTime + deltaTime * nxt.speed, nxt.Duration(), nxt.mode);
+        if (!m_transitionSyncName.empty() && cur.clip != nullptr
+            && nxt.clip != nullptr) {
+            // Synced transition: the incoming clock mirrors the outgoing one
+            // through the shared marker instead of advancing independently.
+            m_nextTime = SyncTrack::MapTime(m_currentTime, cur.clip->sync,
+                                            nxt.clip->sync, m_transitionSyncName,
+                                            cur.Duration(), nxt.Duration());
+        } else {
+            m_nextTime = WrapTime(m_nextTime + deltaTime * nxt.speed,
+                                  nxt.Duration(), nxt.mode);
+        }
         m_blendElapsed += deltaTime;
-        const float t = m_blendDuration > 1e-6f ? m_blendElapsed / m_blendDuration : 1.0f;
+        const float raw = m_blendDuration > 1e-6f ? m_blendElapsed / m_blendDuration : 1.0f;
+        const float t = Motion::Ease(m_transitionEasing, raw);
         const Pose nextPose = nxt.Sample(m_nextTime, m_params);
-        if (t >= 1.0f) {
+        if (raw >= 1.0f) {
             // Fade complete: the incoming state becomes current.
             m_current = m_next;
             m_currentTime = m_nextTime;

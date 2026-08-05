@@ -1,6 +1,8 @@
 #ifndef CONCORD_FLUIDMCTABLE_H
 #define CONCORD_FLUIDMCTABLE_H
 
+#include "Concord/CExport.h"
+
 #include <cstdint>
 
 namespace Concord::Fluid {
@@ -18,10 +20,10 @@ namespace Concord::Fluid {
  * membership and complement symmetry) and the GPU simply uploads it once
  * into a read-only buffer for the sparse-MC compute passes.
  */
-extern const int kFluidMcTriTable[256 * 16];
+CENGINE_API extern const int kFluidMcTriTable[256 * 16];
 
 /** Per-case triangle count derived from kFluidMcTriTable (0..5). */
-int FluidMcTriangleCount(int caseIndex) noexcept;
+CENGINE_API int FluidMcTriangleCount(int caseIndex) noexcept;
 
 /**
  * Structural self-check of the table: every entry is a valid, actually-cut
@@ -31,7 +33,7 @@ int FluidMcTriangleCount(int caseIndex) noexcept;
  * triangulates the ambiguous cases asymmetrically to avoid interior holes.
  * @return true when the table is structurally sound.
  */
-bool ValidateFluidMcTable() noexcept;
+CENGINE_API bool ValidateFluidMcTable() noexcept;
 
 } // namespace Concord::Fluid
 

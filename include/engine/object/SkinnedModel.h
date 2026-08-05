@@ -2,9 +2,10 @@
 #define CONCORD_SKINNEDMODEL_H
 
 #include "Concord/CExport.h"
-#include "engine/animation/PlaybackMode.h"
-#include "engine/animation/SkeletalClip.h"
-#include "engine/animation/Skeleton.h"
+#include "engine/animation/clip/PlaybackMode.h"
+#include "engine/animation/clip/SkeletalClip.h"
+#include "engine/animation/skeleton/Skeleton.h"
+#include "engine/animation/clip/SkeletalEventSampler.h"
 #include "engine/asset/import/ImportedModel.h"
 #include "engine/material/MaterialDesc.h"
 #include "engine/object/Node.h"
@@ -87,11 +88,57 @@ public:
      */
     void ApplyPose(const Animation::SkeletonPose& pose);
 
+    /**
+     * @brief Registers a callback for the playing clip's event markers.
+     *
+     * Markers defined on the clip's `events` track fire as this model's own
+     * playback crosses them (the path driven by PlayClip, not ApplyPose).
+     * Direction and loop wrapping are honoured; see SkeletalEventSampler.
+     * Only one callback is stored; setting another replaces it.
+     */
+    void SetAnimationEventCallback(
+        std::function<void(const Animation::SkeletalEvent&)> callback);
+
+    /**
+     * @brief Enables root motion for the playing clip's `rootBone`.
+     *
+     * The root bone's animated world motion is applied to this node's
+     * transform each frame instead of deforming the mesh: the bone is reset
+     * to its bind pose in the skinning pose (no double movement) and the
+     * node translates/rotates by the per-frame delta. The node is assumed to
+     * sit at the scene root (a character's usual place); a rotated parent
+     * would skew the applied delta.
+     */
+    void SetRootMotionEnabled(bool enabled) noexcept { m_rootMotionEnabled = enabled; }
+
+    /** True while root motion consumes the clip's root-bone motion. */
+    bool IsRootMotionEnabled() const noexcept { return m_rootMotionEnabled; }
+
+    /**
+     * @brief Applies a model-space root-motion delta to this node.
+     *
+     * The position delta is rotated by the node's own facing before
+     * translating; the rotation delta composes onto the node. Shared by the
+     * built-in root-motion path and external animators (SkeletalAnimator).
+     * Assumes the node sits at the scene root.
+     */
+    void ApplyRootMotion(const Vector3& positionDelta,
+                         const Quaternion& rotationDelta);
+
     /** Playback rate multiplier (1 = real time). */
     void SetSpeed(float speed) noexcept { m_speed = speed; }
 
     /** Current playback time within the clip, in seconds. */
     float Time() const noexcept { return m_time; }
+
+    /**
+     * The pose currently driving the skin (clip playback or the last
+     * ApplyPose). Read-only snapshot of the model's own state.
+     */
+    const Animation::SkeletonPose& CurrentPose() const noexcept
+    {
+        return m_pose;
+    }
 
     /** Replaces the material applied to every imported or procedural sub-mesh. */
     void SetMaterialOverride(Material::MaterialDesc material);
@@ -101,6 +148,8 @@ public:
 
 private:
     void Advance(float deltaTime);
+    void FireClipEvents(float oldTime, float newTime, float bounceBoundary,
+                        float duration);
     void PrewarmMeshes();
     void CollectRender(std::vector<RenderInstance>& out) const override;
     MeshHandle EnsureMesh(std::size_t i) const;
@@ -125,8 +174,12 @@ private:
     Animation::PlaybackMode m_mode = Animation::PlaybackMode::Loop;
     float m_time = 0.0f;
     float m_speed = 1.0f;
+    bool m_pingPongReversing = false; ///< true while PingPong playback runs backwards
     /** True once a SkeletalStateMachine drives the pose via ApplyPose; disables own playback. */
     bool m_externallyDriven = false;
+    /** Root motion consumes the clip's root-bone motion into this node. */
+    bool m_rootMotionEnabled = false;
+    Animation::SkeletalEventSampler m_eventSampler;
 
     Animation::SkeletonPose m_pose;
     /** Column-major bone matrices for the current pose; referenced by RenderInstance. */

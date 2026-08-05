@@ -17,6 +17,14 @@ namespace Concord::Object {
 
 namespace {
 
+/** Rotates @p v by @p q (q * v * q^-1). */
+Vector3 RotateVector(const Quaternion& q, const Vector3& v) noexcept
+{
+    const Quaternion p{v.x, v.y, v.z, 0.0f};
+    const Quaternion r = q * p * Quaternion{-q.x, -q.y, -q.z, q.w};
+    return Vector3{r.x, r.y, r.z};
+}
+
 /** Wraps/clamps a playback time into a clip's timeline per its PlaybackMode. */
 float WrapClipTime(float time, float duration, Animation::PlaybackMode mode) noexcept
 {
@@ -140,12 +148,16 @@ void SkinnedModel::PlayClip(const Animation::SkeletalClip* clip, Animation::Play
     m_clip = clip;
     m_mode = mode;
     m_time = 0.0f;
+    m_pingPongReversing = false;
+    m_eventSampler.Reset();
 }
 
 void SkinnedModel::Stop()
 {
     m_clip = nullptr;
     m_time = 0.0f;
+    m_pingPongReversing = false;
+    m_eventSampler.Reset();
     m_pose = m_skeleton.BindPose();
     m_skeleton.ComputePalette(m_pose, m_palette);
     RefreshPoseBounds();
@@ -193,14 +205,119 @@ void SkinnedModel::Advance(float deltaTime)
     }
     if (m_clip != nullptr) {
         const float duration = m_clip->Duration();
-        m_time = WrapClipTime(m_time + deltaTime * m_speed, duration, m_mode);
+        const float oldTime = m_time;
+        float bounceBoundary = -1.0f;
+        if (m_mode == Animation::PlaybackMode::PingPong && duration > 0.0f) {
+            // Track the bounce explicitly so the frame that turns around can
+            // deliver the events crossed in both directions (mirrors
+            // AnimationPlayer).
+            const float step = deltaTime * m_speed;
+            m_time += m_pingPongReversing ? -step : step;
+            if (m_time >= duration) {
+                bounceBoundary = duration;
+                m_time = duration - (m_time - duration);
+                m_pingPongReversing = true;
+            } else if (m_time < 0.0f) {
+                bounceBoundary = 0.0f;
+                m_time = -m_time;
+                m_pingPongReversing = false;
+            }
+        } else {
+            m_time = WrapClipTime(m_time + deltaTime * m_speed, duration, m_mode);
+        }
         m_clip->Sample(m_time, m_skeleton, m_pose);
+        if (m_rootMotionEnabled && m_clip->rootBone >= 0) {
+            Vector3 positionDelta;
+            Quaternion rotationDelta;
+            if (bounceBoundary >= 0.0f) {
+                // A PingPong bounce turns around mid-frame: deliver the root
+                // motion of the outgoing segment, then the incoming segment
+                // coming back. SampleRootMotion alone would misread the
+                // reversed span as a loop wrap.
+                const bool reachedEnd = bounceBoundary >= duration;
+                Vector3 outgoingPosition;
+                Quaternion outgoingRotation;
+                Vector3 incomingForwardPosition;
+                Quaternion incomingForwardRotation;
+                if (m_clip->SampleRootMotion(oldTime, bounceBoundary, m_skeleton,
+                                             outgoingPosition, outgoingRotation)
+                    && m_clip->SampleRootMotion(m_time, bounceBoundary, m_skeleton,
+                                                incomingForwardPosition,
+                                                incomingForwardRotation)) {
+                    // The incoming segment ran backwards: its delta is the
+                    // negation of the forward span.
+                    positionDelta = Vector3{
+                        outgoingPosition.x - incomingForwardPosition.x,
+                        outgoingPosition.y - incomingForwardPosition.y,
+                        outgoingPosition.z - incomingForwardPosition.z,
+                    };
+                    rotationDelta = outgoingRotation
+                        * Quaternion{-incomingForwardRotation.x,
+                                     -incomingForwardRotation.y,
+                                     -incomingForwardRotation.z,
+                                     incomingForwardRotation.w};
+                    ApplyRootMotion(positionDelta, rotationDelta);
+                }
+            } else if (m_clip->SampleRootMotion(oldTime, m_time, m_skeleton,
+                                                positionDelta, rotationDelta)) {
+                ApplyRootMotion(positionDelta, rotationDelta);
+            }
+            if (m_clip->rootBone < static_cast<int>(m_pose.local.size())) {
+                // The root bone's motion is carried by the node now; reset it
+                // to bind in the skinning pose so the mesh is not displaced
+                // twice.
+                m_pose.local[static_cast<std::size_t>(m_clip->rootBone)] =
+                    m_skeleton.bones[static_cast<std::size_t>(m_clip->rootBone)].bindLocal;
+            }
+        }
+        FireClipEvents(oldTime, m_time, bounceBoundary, duration);
     } else {
         m_pose = m_skeleton.BindPose();
     }
     m_skeleton.ComputePalette(m_pose, m_palette);
     RefreshPoseBounds();
     PrewarmMeshes();
+}
+
+void SkinnedModel::FireClipEvents(float oldTime, float newTime,
+                                  float bounceBoundary, float duration)
+{
+    if (m_clip == nullptr || m_clip->events.Empty()) {
+        return;
+    }
+    if (bounceBoundary >= 0.0f) {
+        // A PingPong bounce crosses the boundary twice in one frame: once in
+        // the outgoing direction, then again coming back. Deliver both
+        // windows; the second starts fresh from the boundary.
+        const bool reachedEnd = bounceBoundary >= duration;
+        m_eventSampler.Collect(m_clip->events, bounceBoundary, duration,
+                               m_mode, reachedEnd);
+        m_eventSampler.SetTime(bounceBoundary);
+        m_eventSampler.Collect(m_clip->events, newTime, duration, m_mode,
+                               !reachedEnd);
+        return;
+    }
+    const bool forward = newTime >= oldTime;
+    m_eventSampler.Collect(m_clip->events, newTime, duration, m_mode, forward);
+}
+
+void SkinnedModel::SetAnimationEventCallback(
+    std::function<void(const Animation::SkeletalEvent&)> callback)
+{
+    m_eventSampler.ClearCallbacks();
+    m_eventSampler.AddCallback(std::move(callback));
+}
+
+void SkinnedModel::ApplyRootMotion(const Vector3& positionDelta,
+                                   const Quaternion& rotationDelta)
+{
+    // The node sits at the scene root (see SetRootMotionEnabled), so local
+    // and world coincide. The position delta lives in the skeleton's model
+    // space: rotate it by the node's own facing before translating.
+    const Quaternion facing = LocalTransform().rotation;
+    const Vector3 worldDelta = RotateVector(facing, positionDelta);
+    Translate(worldDelta);
+    Rotate(rotationDelta);
 }
 
 MeshHandle SkinnedModel::EnsureMesh(std::size_t i) const

@@ -60,7 +60,33 @@ public:
     /** Index of the bone named @p name, or -1 if there is none. */
     int BoneIndex(const std::string& name) const;
 
-    /** A fresh pose seeded from every bone's bind-time local transform. */
+    /**
+     * @brief Collects the ancestor chain of one bone, bottom-up.
+     *
+     * @p out receives the bone itself first, then its parent, and so on up to
+     * the root. This is what IK solvers and attachment code walk when they
+     * need every transform between a joint and the skeleton root.
+     * @return false when @p boneIndex is out of range or the parent chain
+     *         loops; @p out is cleared in that case.
+     */
+    bool ChainToRoot(int boneIndex, std::vector<int>& out) const;
+
+    /**
+     * @brief Computes one bone's global (model-space) matrix for @p pose.
+     *
+     * Unlike ComputePalette this returns the bone's *own* animated global
+     * transform (parent chain composed, rootTransform applied) without the
+     * inverse-bind multiplication — the matrix an attachment or IK query
+     * needs. For a bind pose with an identity inverse-bind matrix the two
+     * agree; in general `palette[i] == boneWorld(i) * inverseBind[i]`.
+     * @return false when @p boneIndex is out of range or `pose` does not
+     *         match the skeleton's bone count.
+     */
+    bool ComputeBoneWorld(const SkeletonPose& pose, int boneIndex,
+                          Matrix4& out) const;
+
+    /**
+     * A fresh pose seeded from every bone's bind-time local transform. */
     SkeletonPose BindPose() const;
 
     /**

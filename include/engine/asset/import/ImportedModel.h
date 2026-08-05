@@ -1,8 +1,8 @@
 #ifndef CONCORD_IMPORTEDMODEL_H
 #define CONCORD_IMPORTEDMODEL_H
 
-#include "engine/animation/SkeletalClip.h"
-#include "engine/animation/Skeleton.h"
+#include "engine/animation/clip/SkeletalClip.h"
+#include "engine/animation/skeleton/Skeleton.h"
 #include "engine/material/MaterialDesc.h"
 #include "engine/render/mesh/MeshData.h"
 #include "math/Vector3.h"

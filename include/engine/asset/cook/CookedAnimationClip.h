@@ -1,7 +1,7 @@
 #ifndef CONCORD_COOKEDANIMATIONCLIP_H
 #define CONCORD_COOKEDANIMATIONCLIP_H
 
-#include "engine/animation/SkeletalClip.h"
+#include "engine/animation/clip/SkeletalClip.h"
 
 #include <cstddef>
 #include <cstdint>

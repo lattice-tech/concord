@@ -1,4 +1,4 @@
-#include "engine/animation/AnimationPlayer.h"
+#include "engine/animation/clip/AnimationPlayer.h"
 
 #include "engine/object/Node.h"
 
@@ -12,6 +12,7 @@ void AnimationPlayer::Play(const AnimationClip* clip, PlaybackMode mode)
     m_mode = mode;
     m_time = 0.0f;
     m_pingPongReversing = false;
+    m_eventSampler.Reset();
     m_playing = clip != nullptr;
     if (m_playing) {
         // Snap to the first pose immediately so a freshly-played clip does not
@@ -26,6 +27,7 @@ void AnimationPlayer::Stop() noexcept
     m_playing = false;
     m_time = 0.0f;
     m_pingPongReversing = false;
+    m_eventSampler.Reset();
 }
 
 void AnimationPlayer::Resume() noexcept
@@ -49,8 +51,11 @@ void AnimationPlayer::Update(float deltaTime)
     }
 
     const float step = deltaTime * m_speed;
+    const bool wasForward = !m_pingPongReversing;
+    const float oldTime = m_time;
     m_time += m_pingPongReversing ? -step : step;
 
+    float bounceBoundary = -1.0f;
     switch (m_mode) {
         case PlaybackMode::Once:
             if (m_time >= duration) {
@@ -71,9 +76,11 @@ void AnimationPlayer::Update(float deltaTime)
 
         case PlaybackMode::PingPong:
             if (m_time >= duration) {
+                bounceBoundary = duration;
                 m_time = duration - (m_time - duration);
                 m_pingPongReversing = true;
             } else if (m_time < 0.0f) {
+                bounceBoundary = 0.0f;
                 m_time = -m_time;
                 m_pingPongReversing = false;
             }
@@ -81,6 +88,44 @@ void AnimationPlayer::Update(float deltaTime)
     }
 
     ApplyPose();
+    FireEvents(oldTime, m_time, bounceBoundary, wasForward, duration, step);
+}
+
+void AnimationPlayer::FireEvents(float oldTime, float newTime,
+                                 float bounceBoundary, bool wasForward,
+                                 float duration, float rawStep)
+{
+    if (m_clip == nullptr || m_clip->events.Empty()) {
+        return;
+    }
+    if (bounceBoundary >= 0.0f) {
+        // A PingPong bounce crosses the boundary twice in one frame: once in
+        // the outgoing direction, then again coming back. Deliver both
+        // windows; the second starts fresh from the boundary.
+        m_eventSampler.Collect(m_clip->events, bounceBoundary, duration,
+                               m_mode, wasForward);
+        m_eventSampler.SetTime(bounceBoundary);
+        m_eventSampler.Collect(m_clip->events, newTime, duration, m_mode,
+                               !wasForward);
+        return;
+    }
+    // A loop frame that crosses the wrap and lands exactly on the old time (a
+    // whole turn) is invisible to the sampler's from==to window; split it
+    // manually. The regular wrap (newTime < oldTime) is handled by the
+    // sampler itself.
+    const bool crossedWrap = m_mode == PlaybackMode::Loop && duration > 0.0f
+        && ((rawStep >= 0.0f && oldTime + rawStep >= duration)
+            || (rawStep < 0.0f && oldTime + rawStep <= 0.0f));
+    if (crossedWrap) {
+        m_eventSampler.Collect(m_clip->events, duration, duration, m_mode,
+                               rawStep >= 0.0f);
+        m_eventSampler.Reset();
+        m_eventSampler.Collect(m_clip->events, newTime, duration, m_mode,
+                               rawStep >= 0.0f);
+        return;
+    }
+    m_eventSampler.Collect(m_clip->events, newTime, duration, m_mode,
+                           wasForward);
 }
 
 void AnimationPlayer::ApplyPose()
@@ -99,6 +144,13 @@ void AnimationPlayer::ApplyPose()
     if (!m_clip->scale.Empty()) {
         m_target->SetScale(m_clip->scale.Sample(m_time));
     }
+}
+
+void AnimationPlayer::SetEventCallback(
+    std::function<void(const SkeletalEvent&)> callback)
+{
+    m_eventSampler.ClearCallbacks();
+    m_eventSampler.AddCallback(std::move(callback));
 }
 
 int AnimationPlayer::CurrentFrame() const

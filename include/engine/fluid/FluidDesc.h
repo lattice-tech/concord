@@ -1,6 +1,7 @@
 #ifndef CONCORD_FLUIDDESC_H
 #define CONCORD_FLUIDDESC_H
 
+#include "Concord/CExport.h"
 #include "engine/object/Transform.h"
 #include "math/Vector3.h"
 
@@ -142,10 +143,10 @@ struct FluidLayout {
  * overflowing particle count; a fill box that would exceed the particle cap
  * is preserved by widening the effective spacing instead of truncating.
  */
-FluidLayout ComputeFluidLayout(const FluidTankDesc& desc);
+CENGINE_API FluidLayout ComputeFluidLayout(const FluidTankDesc& desc);
 
 /** Returns a copy of `desc` with every field clamped to a usable value. */
-FluidTankDesc NormalizeFluidDesc(const FluidTankDesc& desc);
+CENGINE_API FluidTankDesc NormalizeFluidDesc(const FluidTankDesc& desc);
 
 } // namespace Concord::Fluid
 

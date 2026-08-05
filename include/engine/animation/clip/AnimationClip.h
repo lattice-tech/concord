@@ -1,9 +1,11 @@
 #ifndef CONCORD_ANIMATIONCLIP_H
 #define CONCORD_ANIMATIONCLIP_H
 
-#include "engine/animation/AnimationTrack.h"
-#include "engine/animation/Pose.h"
-#include "engine/animation/SpriteTrack.h"
+#include "engine/animation/clip/AnimationTrack.h"
+#include "engine/animation/blend/Pose.h"
+#include "engine/animation/clip/SkeletalEventTrack.h"
+#include "engine/animation/clip/SpriteTrack.h"
+#include "engine/animation/clip/SyncTrack.h"
 #include "engine/motion/Easing.h"
 #include "math/Quaternion.h"
 #include "math/Vector3.h"
@@ -43,6 +45,15 @@ struct AnimationClip {
 
     /** 2D sprite frame sequence (empty = no sprite animation). */
     SpriteTrack sprite;
+
+    /**
+     * Named timeline markers fired as playback crosses them (footsteps,
+     * impacts, state hooks). Pure data; SkeletalEventSampler delivers them.
+     */
+    SkeletalEventTrack events;
+
+    /** Named alignment markers for blend spaces and crossfades (SyncTrack). */
+    SyncTrack sync;
 
     /**
      * Explicit clip length in seconds. When 0, Duration() falls back to the

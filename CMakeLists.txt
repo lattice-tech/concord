@@ -229,11 +229,25 @@ if(BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/EngineRegressionT
             tests/assetCook/CookedModelTests.cpp
             tests/assetCook/CookPlannerTests.cpp
             tests/assetCook/CookSessionTests.cpp
-            tests/spatial/SpatialTreeTests.cpp
-            tests/spatial/BroadphasePairsTests.cpp
-            tests/spatial/PersistentBroadphaseTests.cpp
-            tests/spatial/InstanceCullTests.cpp
-            tests/spatial/CameraFrustumTests.cpp
+             tests/spatial/SpatialTreeTests.cpp
+             tests/spatial/BroadphasePairsTests.cpp
+             tests/spatial/PersistentBroadphaseTests.cpp
+             tests/spatial/InstanceCullTests.cpp
+             tests/spatial/CameraFrustumTests.cpp
+             tests/animation/BlendSpace2DTests.cpp
+             src/engine/animation/blend/detail/BlendSpace2DGeometry.cpp
+             tests/animation/SkeletonToolsTests.cpp
+             tests/animation/AnimationEventTests.cpp
+             tests/animation/SyncTrackTests.cpp
+             tests/animation/RootMotionTests.cpp
+             tests/animation/AnimatorLayerTests.cpp
+             tests/character/CharacterMotorTests.cpp
+             tests/gameplay/ActionQueueTests.cpp
+             tests/water/WaterSurfaceTests.cpp
+             tests/water/WaterBodyTests.cpp
+             tests/fluid/FluidMcTableTests.cpp
+             tests/fluid/FluidDescTests.cpp
+             tests/fluid/FluidWaterTests.cpp
             src/engine/spatial/DynamicAabbTree.cpp
             src/engine/spatial/DynamicAabbTreeBalance.cpp
             src/engine/spatial/DynamicAabbTreeQueries.cpp

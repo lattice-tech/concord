@@ -1,8 +1,11 @@
 #ifndef CONCORD_SKELETALCLIP_H
 #define CONCORD_SKELETALCLIP_H
 
-#include "engine/animation/AnimationTrack.h"
-#include "engine/animation/Skeleton.h"
+#include "Concord/CExport.h"
+#include "engine/animation/clip/AnimationTrack.h"
+#include "engine/animation/clip/SkeletalEventTrack.h"
+#include "engine/animation/clip/SyncTrack.h"
+#include "engine/animation/skeleton/Skeleton.h"
 #include "math/Quaternion.h"
 #include "math/Vector3.h"
 
@@ -40,6 +43,42 @@ struct SkeletalClip {
     float length = 0.0f;
     std::vector<BoneTrack> tracks;
 
+    /**
+     * Named timeline markers fired as playback crosses them (footstep on the
+     * left foot, impact frame of an attack). Pure data; SkeletalEventSampler
+     * delivers them to instance-level callbacks.
+     */
+    SkeletalEventTrack events;
+
+    /**
+     * Named alignment markers used by blend spaces and crossfades to line up
+     * footfalls across clips of different lengths (see SyncTrack).
+     */
+    SyncTrack sync;
+
+    /**
+     * Bone whose animated world motion becomes *root motion*: its translation
+     * and rotation are delivered as deltas for the character's node to apply,
+     * instead of deforming the mesh (the bone is reset to its bind pose in the
+     * skinning pose). -1 (default) disables root motion.
+     */
+    int rootBone = -1;
+
+    /**
+     * @brief Computes the root bone's motion between two playback times.
+     *
+     * Both deltas are in the skeleton's model space: the position delta is the
+     * root bone's world translation difference, the rotation delta the
+     * relative rotation `q(from)^-1 * q(to)`. A wrap (toTime < fromTime, a
+     * loop crossing the end) is split into its tail and head segments and the
+     * deltas combined.
+     * @return false when root motion is disabled or @p rootBone is out of
+     *         range for @p skeleton; the outputs are left untouched.
+     */
+    CENGINE_API bool SampleRootMotion(float fromTime, float toTime,
+                                      const Skeleton& skeleton,
+                                      Vector3& outPositionDelta,
+                                      Quaternion& outRotationDelta) const;
     /** Effective length: explicit `length`, or the longest keyed channel. */
     float Duration() const noexcept
     {

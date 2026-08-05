@@ -1,7 +1,7 @@
 #ifndef CONCORD_SKINNEDMODELDESC_H
 #define CONCORD_SKINNEDMODELDESC_H
 
-#include "engine/animation/Skeleton.h"
+#include "engine/animation/skeleton/Skeleton.h"
 #include "engine/material/MaterialDesc.h"
 #include "engine/object/Transform.h"
 #include "engine/render/mesh/MeshData.h"

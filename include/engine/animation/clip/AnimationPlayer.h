@@ -2,8 +2,9 @@
 #define CONCORD_ANIMATIONPLAYER_H
 
 #include "Concord/CExport.h"
-#include "engine/animation/AnimationClip.h"
-#include "engine/animation/PlaybackMode.h"
+#include "engine/animation/clip/AnimationClip.h"
+#include "engine/animation/clip/PlaybackMode.h"
+#include "engine/animation/clip/SkeletalEventSampler.h"
 
 namespace Concord {
 namespace Object {
@@ -74,9 +75,23 @@ public:
     /** Active 2D sprite frame index at the current time, or -1 if the clip has none. */
     int CurrentFrame() const;
 
+    /**
+     * @brief Registers a callback for the clip's animation-event markers.
+     *
+     * Markers defined on the clip's `events` track fire as playback crosses
+     * them, honouring the playback direction and loop wrapping (see
+     * SkeletalEventSampler). Only one callback is stored; setting another
+     * replaces it. The callback runs inside Update on the caller's thread.
+     */
+    void SetEventCallback(std::function<void(const SkeletalEvent&)> callback);
+
 private:
     /** Writes the clip's sampled channels at `m_time` to the target's local transform. */
     void ApplyPose();
+
+    /** Fires the clip's event markers for the frame's [oldTime, newTime] window. */
+    void FireEvents(float oldTime, float newTime, float bounceBoundary,
+                    bool wasForward, float duration, float rawStep);
 
     const AnimationClip* m_clip = nullptr;
     Object::Node* m_target = nullptr;
@@ -85,6 +100,7 @@ private:
     float m_speed = 1.0f;
     bool m_playing = false;
     bool m_pingPongReversing = false; ///< true while a PingPong clip is running backwards
+    SkeletalEventSampler m_eventSampler;
 };
 
 } // namespace Animation

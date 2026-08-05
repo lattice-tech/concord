@@ -1,10 +1,13 @@
 #ifndef CONCORD_BLENDSPACE1D_H
 #define CONCORD_BLENDSPACE1D_H
 
-#include "engine/animation/AnimationClip.h"
-#include "engine/animation/Pose.h"
+#include "engine/animation/clip/AnimationClip.h"
+#include "engine/animation/clip/SyncTrack.h"
+#include "engine/animation/blend/Pose.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <string>
 #include <vector>
 
 namespace Concord::Animation {
@@ -58,14 +61,91 @@ public:
      */
     Pose Sample(float value, float phase) const
     {
+        return SampleImpl(value, phase, nullptr);
+    }
+
+    /**
+     * @brief Like Sample, but aligns the blended clips through @p syncName.
+     *
+     * The first clip drives a master timeline; every other clip's sample time
+     * maps onto it through the shared marker (SyncTrack::MapTime), so loops of
+     * different lengths stay lined up at the marker. Falls back to plain phase
+     * sampling when the marker is missing on either side.
+     */
+    Pose SampleSynced(float value, float phase, const std::string& syncName) const
+    {
+        return SampleImpl(value, phase, &syncName);
+    }
+
+private:
+    struct Entry {
+        float axis = 0.0f;
+        const AnimationClip* clip = nullptr;
+    };
+
+    static Pose SampleEntryAt(const Entry& e, float time)
+    {
+        if (e.clip == nullptr) {
+            return Pose{};
+        }
+        return e.clip->SamplePose(time);
+    }
+
+    /** Phase-scaled sample time for an entry (0 for a null clip). */
+    static float PhaseTime(const Entry& e, float clampedPhase)
+    {
+        return e.clip != nullptr ? clampedPhase * e.clip->Duration() : 0.0f;
+    }
+
+    Pose SampleImpl(float value, float phase, const std::string* syncName) const
+    {
         if (m_entries.empty()) {
             return Pose{};
         }
+        const float clamped = phase < 0.0f ? 0.0f : (phase > 1.0f ? 1.0f : phase);
+
+        if (syncName == nullptr) {
+            if (m_entries.size() == 1 || value <= m_entries.front().axis) {
+                return SampleEntryAt(m_entries.front(), PhaseTime(m_entries.front(), clamped));
+            }
+            if (value >= m_entries.back().axis) {
+                return SampleEntryAt(m_entries.back(), PhaseTime(m_entries.back(), clamped));
+            }
+            std::size_t i = 0;
+            while (i + 1 < m_entries.size() && m_entries[i + 1].axis <= value) {
+                ++i;
+            }
+            const Entry& a = m_entries[i];
+            const Entry& b = m_entries[i + 1];
+            const float span = b.axis - a.axis;
+            const float t = span > 1e-6f ? (value - a.axis) / span : 0.0f;
+            return BlendPose(SampleEntryAt(a, PhaseTime(a, clamped)),
+                             SampleEntryAt(b, PhaseTime(b, clamped)), t);
+        }
+
+        // Synced path: the first entry drives a master timeline; every other
+        // clip's sample time maps onto it through the shared marker.
+        std::vector<float> times(m_entries.size(), 0.0f);
+        for (std::size_t i = 0; i < m_entries.size(); ++i) {
+            const AnimationClip* clip = m_entries[i].clip;
+            if (clip == nullptr) {
+                continue;
+            }
+            const AnimationClip* master = m_entries.front().clip;
+            if (i == 0 || master == nullptr) {
+                times[i] = clamped * clip->Duration();
+                continue;
+            }
+            times[i] = SyncTrack::MapTime(clamped * master->Duration(),
+                                          master->sync, clip->sync, *syncName,
+                                          master->Duration(), clip->Duration());
+        }
+
         if (m_entries.size() == 1 || value <= m_entries.front().axis) {
-            return SampleEntry(m_entries.front(), phase);
+            return SampleEntryAt(m_entries.front(), times.front());
         }
         if (value >= m_entries.back().axis) {
-            return SampleEntry(m_entries.back(), phase);
+            return SampleEntryAt(m_entries.back(), times.back());
         }
         std::size_t i = 0;
         while (i + 1 < m_entries.size() && m_entries[i + 1].axis <= value) {
@@ -75,22 +155,7 @@ public:
         const Entry& b = m_entries[i + 1];
         const float span = b.axis - a.axis;
         const float t = span > 1e-6f ? (value - a.axis) / span : 0.0f;
-        return BlendPose(SampleEntry(a, phase), SampleEntry(b, phase), t);
-    }
-
-private:
-    struct Entry {
-        float axis = 0.0f;
-        const AnimationClip* clip = nullptr;
-    };
-
-    static Pose SampleEntry(const Entry& e, float phase)
-    {
-        if (e.clip == nullptr) {
-            return Pose{};
-        }
-        const float clamped = phase < 0.0f ? 0.0f : (phase > 1.0f ? 1.0f : phase);
-        return e.clip->SamplePose(clamped * e.clip->Duration());
+        return BlendPose(SampleEntryAt(a, times[i]), SampleEntryAt(b, times[i + 1]), t);
     }
 
     std::vector<Entry> m_entries;

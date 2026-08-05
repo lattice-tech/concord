@@ -1,11 +1,11 @@
 #ifndef CONCORD_ANIMATIONSTATE_H
 #define CONCORD_ANIMATIONSTATE_H
 
-#include "engine/animation/AnimationClip.h"
-#include "engine/animation/AnimationParameters.h"
-#include "engine/animation/BlendSpace1D.h"
-#include "engine/animation/PlaybackMode.h"
-#include "engine/animation/Pose.h"
+#include "engine/animation/clip/AnimationClip.h"
+#include "engine/animation/state/AnimationParameters.h"
+#include "engine/animation/blend/BlendSpace1D.h"
+#include "engine/animation/clip/PlaybackMode.h"
+#include "engine/animation/blend/Pose.h"
 
 #include <string>
 

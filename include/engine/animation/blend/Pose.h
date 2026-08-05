@@ -1,7 +1,7 @@
 #ifndef CONCORD_POSE_H
 #define CONCORD_POSE_H
 
-#include "engine/animation/AnimationTrack.h"
+#include "engine/animation/clip/AnimationTrack.h"
 #include "math/Quaternion.h"
 #include "math/Vector3.h"
 

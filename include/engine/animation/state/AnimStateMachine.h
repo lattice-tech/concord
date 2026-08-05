@@ -2,12 +2,13 @@
 #define CONCORD_ANIMSTATEMACHINE_H
 
 #include "Concord/CExport.h"
-#include "engine/animation/AnimationParameters.h"
-#include "engine/animation/AnimationState.h"
-#include "engine/animation/AnimationTransition.h"
-#include "engine/animation/BlendSpace1D.h"
-#include "engine/animation/PlaybackMode.h"
-#include "engine/animation/Pose.h"
+#include "engine/animation/state/AnimationParameters.h"
+#include "engine/animation/state/AnimationState.h"
+#include "engine/animation/state/AnimationTransition.h"
+#include "engine/animation/blend/BlendSpace1D.h"
+#include "engine/animation/clip/PlaybackMode.h"
+#include "engine/animation/blend/Pose.h"
+#include "engine/motion/Easing.h"
 
 #include <string>
 #include <vector>
@@ -62,9 +63,15 @@ public:
     /**
      * Adds a transition. @p from empty makes it an "any state" transition.
      * Conditions are ANDed; @p duration is the crossfade length in seconds.
+     * @p blendEasing shapes the blend weight across the fade; @p syncName,
+     * when non-empty, aligns the incoming single-clip state's clock to the
+     * outgoing one through the shared marker (see SyncTrack).
      */
     void AddTransition(const std::string& from, const std::string& to,
-                       std::vector<TransitionCondition> conditions, float duration = 0.15f);
+                       std::vector<TransitionCondition> conditions,
+                       float duration = 0.15f,
+                       Motion::Easing blendEasing = Motion::Easing::Linear,
+                       std::string syncName = {});
 
     /** Sets the state the machine starts (and resets) in. */
     void SetEntry(const std::string& name);
@@ -110,6 +117,9 @@ private:
     float m_nextTime = 0.0f;
     float m_blendElapsed = 0.0f;
     float m_blendDuration = 0.0f;
+    /** Blend curve and sync marker of the transition currently fading. */
+    Motion::Easing m_transitionEasing = Motion::Easing::Linear;
+    std::string m_transitionSyncName;
 
     int m_lastFrame = -1;
 };

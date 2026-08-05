@@ -1,7 +1,8 @@
 #ifndef CONCORD_ANIMATIONTRANSITION_H
 #define CONCORD_ANIMATIONTRANSITION_H
 
-#include "engine/animation/AnimationParameters.h"
+#include "engine/animation/state/AnimationParameters.h"
+#include "engine/motion/Easing.h"
 
 #include <string>
 #include <vector>
@@ -53,6 +54,22 @@ struct AnimationTransition {
     std::string to;   ///< destination state name
     std::vector<TransitionCondition> conditions;
     float duration = 0.15f; ///< crossfade time in seconds (0 = instant cut)
+
+    /**
+     * Blend-weight curve applied across the crossfade. Linear keeps the
+     * legacy ramp; EaseIn/OutQuad-style curves spend less time at the
+     * extremes, which hides the pop of a sudden state change better.
+     */
+    Motion::Easing blendEasing = Motion::Easing::Linear;
+
+    /**
+     * When non-empty, the incoming state's clock is aligned to the outgoing
+     * one through the shared marker of this name (see SyncTrack) instead of
+     * advancing independently — footfalls stay lined up across the blend.
+     * Only single-clip states participate; blend states fall back to their
+     * own clock.
+     */
+    std::string syncName;
 };
 
 } // namespace Concord::Animation

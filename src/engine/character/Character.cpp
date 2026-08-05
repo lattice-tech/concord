@@ -9,52 +9,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace Concord::Object {
-
-namespace {
-
-constexpr float kPi = 3.14159265358979323846f;
-constexpr float kDegToRad = kPi / 180.0f;
-constexpr float kRadToDeg = 180.0f / kPi;
-
-/** Unit horizontal forward direction for a yaw in degrees (matches Camera). */
-Vector3 PlanarForward(float yawDeg) noexcept
-{
-    const float rad = yawDeg * kDegToRad;
-    return Vector3{std::sin(rad), 0.0f, std::cos(rad)};
-}
-
-/** Unit horizontal right direction for a yaw in degrees (matches Camera). */
-Vector3 PlanarRight(float yawDeg) noexcept
-{
-    const float rad = yawDeg * kDegToRad;
-    return Vector3{std::cos(rad), 0.0f, -std::sin(rad)};
-}
-
-/** Shortest signed delta (degrees) turning `from` toward `to`, in (-180, 180]. */
-float ShortestAngle(float from, float to) noexcept
-{
-    float delta = std::fmod(to - from + 540.0f, 360.0f) - 180.0f;
-    return delta;
-}
-
-float HorizontalLength(const Vector3& v) noexcept
-{
-    return std::sqrt(v.x * v.x + v.z * v.z);
-}
-
-} // namespace
 
 Character::Character(Gameplay::CharacterConfig config)
     : m_config(std::move(config))
 {
-    m_feet = m_config.position;
     // Sub-nodes need OwningScene(), which isn't linked until Scene::AddNode
     // runs, so defer their creation to the first tick via OnStart.
     OnStart([this] { Initialize(); });
     OnUpdate([this](float deltaTime) { Tick(deltaTime); });
-    SetPosition(m_feet);
+    SetPosition(m_config.position);
 }
 
 void Character::Initialize()
@@ -84,27 +50,78 @@ void Character::Initialize()
     m_camera = &scene->Spawn<Camera>(CameraDesc{});
     scene->SetActiveCamera(*m_camera);
 
+    // Motor: tune from the character config; ground probing runs a downward
+    // scene raycast so the character follows terrain, with the config's
+    // groundY as the fallback plane.
+    Gameplay::CharacterMotorConfig motorConfig;
+    motorConfig.walkSpeed = m_config.walkSpeed;
+    motorConfig.runSpeed = m_config.runSpeed;
+    motorConfig.turnSpeedDegrees = m_config.turnSpeedDegrees;
+    motorConfig.jumpHeight = m_config.jumpHeight;
+    motorConfig.gravity = m_config.gravity;
+    motorConfig.groundY = m_config.groundY;
+    m_motor.SetConfig(motorConfig);
+    m_motor.SetGroundProbe(
+        [scene, this](Vector3 origin, Vector3 down, float maxDistance, float& outY) {
+            Collision::RaycastFilter filter;
+            filter.maxDistance = maxDistance;
+            if (m_collider != nullptr) {
+                // Never ground on the character's own collider.
+                filter.ignoreColliderId = m_collider->Id();
+            }
+            Collision::RaycastHit hit;
+            if (scene->RaycastClosest(Collision::Ray{origin, down}, filter, hit)) {
+                outY = hit.position.y;
+                return true;
+            }
+            return false;
+        });
+
+    // Camera rig frames the look; the config's style/distance/height apply.
+    m_cameraRig.SetCamera(m_camera);
+    m_cameraRig.SetConfig(m_config);
+
     if (m_model->IsValid()) {
         // Idle/walk/run along the speed axis; a missing clip samples bind pose.
         m_locomotion.AddClip(0.0f, m_model->FindClip(m_config.idleClip));
         m_locomotion.AddClip(m_config.walkSpeed, m_model->FindClip(m_config.walkClip));
         m_locomotion.AddClip(m_config.runSpeed, m_model->FindClip(m_config.runClip));
 
-        m_stateMachine.SetTarget(m_model);
-        m_stateMachine.AddBlendState("locomotion", &m_locomotion, "speed");
-        m_stateMachine.SetEntry("locomotion");
+        m_animator.SetTarget(m_model);
+        m_animator.BaseMachine().AddBlendState("locomotion", &m_locomotion, "speed");
+        m_animator.BaseMachine().SetEntry("locomotion");
 
         if (const Animation::SkeletalClip* jump = m_model->FindClip(m_config.jumpClip)) {
             using Op = Animation::TransitionCondition::Op;
-            m_stateMachine.AddState("jump", jump, Animation::PlaybackMode::Loop);
-            m_stateMachine.AddTransition("locomotion", "jump", {{"airborne", Op::IsTrue}}, 0.1f);
-            m_stateMachine.AddTransition("jump", "locomotion", {{"airborne", Op::IsFalse}}, 0.15f);
+            m_animator.BaseMachine().AddState("jump", jump, Animation::PlaybackMode::Loop);
+            m_animator.BaseMachine().AddTransition(
+                "locomotion", "jump", {{"airborne", Op::IsTrue}}, 0.1f);
+            m_animator.BaseMachine().AddTransition(
+                "jump", "locomotion", {{"airborne", Op::IsFalse}}, 0.15f);
             m_hasJumpState = true;
         }
         m_hasStateMachine = true;
     }
 
-    UpdateCamera();
+    // Actions: animation events from the base machine feed the queue; when an
+    // action ends, the machine returns to the action's state (locomotion by
+    // default).
+    if (m_hasStateMachine) {
+        m_animator.BaseMachine().SetEventCallback([this](const Animation::SkeletalEvent& event) {
+            m_actionQueue.NotifyAnimationEvent(event.name);
+        });
+    }
+    m_actionQueue.SetEndCallback([this](const Gameplay::ActionDesc& action) {
+        if (!m_hasStateMachine) {
+            return;
+        }
+        const std::string& target = !action.returnState.empty()
+            ? action.returnState
+            : std::string("locomotion");
+        m_animator.BaseMachine().SetState(target, 0.15f);
+    });
+
+    m_cameraRig.Update(0.0f, m_config.position);
 }
 
 void Character::Tick(float deltaTime)
@@ -112,134 +129,64 @@ void Character::Tick(float deltaTime)
     if (deltaTime <= 0.0f) {
         return;
     }
-    SampleLook();
-    UpdateMovement(deltaTime);
-    UpdateVertical(deltaTime);
-
-    SetPosition(m_feet);
-    SetRotation(Quaternion::FromEuler({.yaw = m_bodyYaw}));
-
-    UpdateAnimation(deltaTime);
-    UpdateCamera();
-}
-
-void Character::SampleLook()
-{
-    if (!m_mouseLook || !m_controlEnabled) {
-        return;
+    if (m_mouseLook && m_controlEnabled) {
+        m_cameraRig.ApplyMouseLook(Input::MouseDeltaX(), Input::MouseDeltaY());
     }
-    m_cameraYaw += Input::MouseDeltaX() * m_config.mouseSensitivity;
-    m_cameraPitch -= Input::MouseDeltaY() * m_config.mouseSensitivity;
-    m_cameraPitch = std::clamp(m_cameraPitch, -85.0f, 85.0f);
-}
 
-void Character::UpdateMovement(float deltaTime)
-{
     const float inputForward = m_controlEnabled
         ? (Input::IsKeyDown(Key::W) ? 1.0f : 0.0f) - (Input::IsKeyDown(Key::S) ? 1.0f : 0.0f)
         : 0.0f;
     const float inputRight = m_controlEnabled
         ? (Input::IsKeyDown(Key::D) ? 1.0f : 0.0f) - (Input::IsKeyDown(Key::A) ? 1.0f : 0.0f)
         : 0.0f;
-
-    const Vector3 forward = PlanarForward(m_cameraYaw);
-    const Vector3 right = PlanarRight(m_cameraYaw);
-    Vector3 desired = forward * inputForward + right * inputRight;
-
-    const float desiredLen = HorizontalLength(desired);
-    const bool moving = desiredLen > 1e-3f;
-    if (moving) {
-        m_moveDir = Vector3{desired.x / desiredLen, 0.0f, desired.z / desiredLen};
-    }
-
     const bool running = m_controlEnabled
         && (Input::IsKeyDown(Key::LeftShift) || Input::IsKeyDown(Key::RightShift));
-    const float targetSpeed = moving ? (running ? m_config.runSpeed : m_config.walkSpeed) : 0.0f;
+    m_motor.SetInput(inputForward, inputRight, running);
+    m_motor.SetReferenceYaw(m_cameraRig.Yaw());
+    m_motor.Update(deltaTime, *this);
 
-    // Ease the speed so starts/stops aren't instantaneous (footfall-friendly).
-    float k = deltaTime * 10.0f;
-    k = std::clamp(k, 0.0f, 1.0f);
-    m_speed += (targetSpeed - m_speed) * k;
-    if (m_speed < 0.01f) {
-        m_speed = 0.0f;
-    }
+    m_cameraRig.Update(deltaTime, WorldPosition());
 
-    m_feet = m_feet + m_moveDir * (m_speed * deltaTime);
+    m_actionQueue.Update(deltaTime);
 
-    // Turn the body toward travel at the configured rate.
-    if (moving) {
-        const float targetYaw = std::atan2(m_moveDir.x, m_moveDir.z) * kRadToDeg;
-        const float delta = ShortestAngle(m_bodyYaw, targetYaw);
-        const float maxStep = m_config.turnSpeedDegrees * deltaTime;
-        m_bodyYaw += std::clamp(delta, -maxStep, maxStep);
-    }
-}
-
-void Character::UpdateVertical(float deltaTime)
-{
-    const bool jumpPressed = m_jumpQueued
-        || (m_controlEnabled && Input::WasKeyPressed(Key::Space));
-    m_jumpQueued = false;
-    if (m_grounded && jumpPressed && m_config.jumpHeight > 0.0f) {
-        m_verticalVelocity = std::sqrt(2.0f * m_config.gravity * m_config.jumpHeight);
-        m_grounded = false;
-    }
-
-    if (!m_grounded) {
-        m_verticalVelocity -= m_config.gravity * deltaTime;
-        m_feet.y += m_verticalVelocity * deltaTime;
-        if (m_feet.y <= m_config.groundY) {
-            m_feet.y = m_config.groundY;
-            m_verticalVelocity = 0.0f;
-            m_grounded = true;
+    if (m_hasStateMachine) {
+        m_animator.Parameters().SetFloat("speed", m_motor.Speed());
+        if (m_hasJumpState) {
+            m_animator.Parameters().SetBool("airborne", !m_motor.IsGrounded());
         }
-    } else {
-        m_feet.y = m_config.groundY;
+        m_animator.Update(deltaTime);
     }
-}
-
-void Character::UpdateAnimation(float deltaTime)
-{
-    if (!m_hasStateMachine) {
-        return;
-    }
-    m_stateMachine.Parameters().SetFloat("speed", m_speed);
-    if (m_hasJumpState) {
-        m_stateMachine.Parameters().SetBool("airborne", !m_grounded);
-    }
-    m_stateMachine.Update(deltaTime);
-}
-
-void Character::UpdateCamera()
-{
-    if (m_camera == nullptr) {
-        return;
-    }
-    m_camera->SetYaw(m_cameraYaw);
-    m_camera->SetPitch(m_cameraPitch);
-
-    if (m_config.cameraStyle == Gameplay::CameraStyle::FirstPerson) {
-        m_camera->SetPosition(m_feet + Vector3{0.0f, m_config.eyeHeight, 0.0f});
-        return;
-    }
-
-    // Third person: trail behind/above the look target by cameraDistance.
-    const Vector3 target = m_feet + Vector3{0.0f, m_config.cameraTargetHeight, 0.0f};
-    const float yawRad = m_cameraYaw * kDegToRad;
-    const float pitchRad = m_cameraPitch * kDegToRad;
-    const float cosPitch = std::cos(pitchRad);
-    const Vector3 lookDir{cosPitch * std::sin(yawRad), std::sin(pitchRad), cosPitch * std::cos(yawRad)};
-    m_camera->SetPosition(target - lookDir * m_config.cameraDistance);
 }
 
 void Character::Jump()
 {
-    m_jumpQueued = true;
+    m_motor.Jump();
+}
+
+bool Character::TryAction(const Gameplay::ActionDesc& action)
+{
+    if (!m_actionQueue.TryStart(action)) {
+        return false;
+    }
+    if (!action.animationState.empty() && m_hasStateMachine) {
+        m_animator.BaseMachine().SetState(action.animationState, 0.1f);
+    }
+    return true;
+}
+
+bool Character::IsGrounded() const noexcept
+{
+    return m_motor.IsGrounded();
 }
 
 Vector3 Character::Velocity() const noexcept
 {
-    return m_moveDir * m_speed + Vector3{0.0f, m_verticalVelocity, 0.0f};
+    return m_motor.Velocity();
+}
+
+float Character::Speed() const noexcept
+{
+    return m_motor.Speed();
 }
 
 } // namespace Concord::Object

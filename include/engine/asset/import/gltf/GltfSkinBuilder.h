@@ -1,8 +1,8 @@
 #ifndef CONCORD_GLTF_SKINBUILDER_H
 #define CONCORD_GLTF_SKINBUILDER_H
 
-#include "engine/animation/SkeletalClip.h"
-#include "engine/animation/Skeleton.h"
+#include "engine/animation/clip/SkeletalClip.h"
+#include "engine/animation/skeleton/Skeleton.h"
 #include "engine/asset/import/gltf/GltfJson.h"
 #include "engine/render/mesh/MeshData.h"
 

@@ -20,5 +20,9 @@
 
 #include "engine/character/Character.h"
 #include "engine/character/CharacterConfig.h"
+#include "engine/character/camera/CharacterCameraRig.h"
+#include "engine/character/motor/CharacterMotor.h"
+#include "engine/gameplay/action/Action.h"
+#include "engine/gameplay/action/ActionQueue.h"
 
 #endif // CONCORD_CCHARACTER_H
